@@ -3,11 +3,16 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PageLayout, RichSegment, TextSpan } from '@/types/document'
 import { paperAssetUrl } from '@/api/papers'
 import KatexView from '@/components/reader/KatexView.vue'
+import { encodeSentRanges, mathUnitKey, pageUnitAlign, pickSentenceIdFromTarget } from '@/lib/sentenceLayout'
 
 const props = defineProps<{
   paperId: string
   page: PageLayout
   scale: number
+}>()
+
+const emit = defineEmits<{
+  hoverSentence: [id: string | null]
 }>()
 
 const width = computed(() => props.page.width * props.scale)
@@ -21,7 +26,31 @@ const CSS_ASCENDER = 0.72
 
 type LayerItem =
   | { kind: 'text'; id: string; blockId: string; span: TextSpan; y: number; x: number }
-  | { kind: 'math'; id: string; seg: RichSegment; y: number; x: number }
+  | { kind: 'math'; id: string; mathKey: string; seg: RichSegment; y: number; x: number }
+
+const unitAlign = computed(() => pageUnitAlign(props.page))
+
+function itemSentenceIds(item: LayerItem): string[] {
+  if (item.kind === 'text') return unitAlign.value.get(item.span.id)?.ids || []
+  return unitAlign.value.get(item.mathKey)?.ids || []
+}
+
+function itemSentRanges(item: LayerItem): string {
+  const key = item.kind === 'text' ? item.span.id : item.mathKey
+  const ranges = unitAlign.value.get(key)?.ranges || []
+  return encodeSentRanges(ranges)
+}
+
+function onLayoutPointerOver(e: PointerEvent) {
+  const el = (e.target as HTMLElement | null)?.closest?.('[data-sentence-id]') as HTMLElement | null
+  if (!el) return
+  const id = pickSentenceIdFromTarget(el, e.clientX)
+  if (id) emit('hoverSentence', id)
+}
+
+function onLayoutPointerLeave() {
+  emit('hoverSentence', null)
+}
 
 const inlineMath = computed(() => {
   const out: RichSegment[] = []
@@ -136,6 +165,7 @@ const readingItems = computed(() => {
     items.push({
       kind: 'math',
       id: `math-${i}-${b[0]}-${b[1]}`,
+      mathKey: mathUnitKey(b),
       seg,
       y: b[1],
       x: b[0],
@@ -754,8 +784,11 @@ onBeforeUnmount(() => {
 <template>
   <div
     ref="rootEl"
+    data-layout-root
     class="relative bg-white shadow-sm ring-1 ring-black/5"
     :style="{ width: `${width}px`, height: `${height}px` }"
+    @pointerover="onLayoutPointerOver"
+    @pointerleave="onLayoutPointerLeave"
   >
     <img
       v-for="img in layoutImages"
@@ -774,6 +807,9 @@ onBeforeUnmount(() => {
         data-sel
         data-sel-atomic
         data-math-display=""
+        :data-sentence-id="itemSentenceIds(item)[0] || undefined"
+        :data-sentence-ids="itemSentenceIds(item).join(',') || undefined"
+        :data-sent-ranges="itemSentRanges(item) || undefined"
         :data-sel-index="idx"
         :data-sel-col="itemColumn(item.x)"
         :style="mathBoxStyle(item.seg)"
@@ -803,6 +839,9 @@ onBeforeUnmount(() => {
         data-sel
         data-sel-atomic
         data-math-inline=""
+        :data-sentence-id="itemSentenceIds(item)[0] || undefined"
+        :data-sentence-ids="itemSentenceIds(item).join(',') || undefined"
+        :data-sent-ranges="itemSentRanges(item) || undefined"
         :data-sel-index="idx"
         :data-sel-col="itemColumn(item.x)"
         :data-math-complex="latexIsComplex(item.seg.latex || '') ? '1' : '0'"
@@ -822,6 +861,9 @@ onBeforeUnmount(() => {
         v-else
         :data-block-id="item.blockId"
         :data-span-id="item.id"
+        :data-sentence-id="itemSentenceIds(item)[0] || undefined"
+        :data-sentence-ids="itemSentenceIds(item).join(',') || undefined"
+        :data-sent-ranges="itemSentRanges(item) || undefined"
         data-sel
         :data-sel-index="idx"
         :data-sel-col="itemColumn(item.x)"
@@ -844,5 +886,10 @@ onBeforeUnmount(() => {
   vertical-align: baseline;
   font-size: 1em;
   max-width: none;
+}
+.sentence-hit {
+  background-color: rgb(253 224 71 / 0.42);
+  box-shadow: 0 0 0 2px rgb(245 158 11 / 0.28);
+  border-radius: 2px;
 }
 </style>

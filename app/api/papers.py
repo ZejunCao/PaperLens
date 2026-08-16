@@ -5,12 +5,11 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.schemas.document import Document
 from app.schemas.job import JobOut
 from app.schemas.paper import PaperListResponse, PaperOut, PaperRename
 from app.services import jobs as jobs_service
 from app.services import papers as papers_service
-from app.services.documents import load_document, paper_dir
+from app.services.documents import document_path, paper_dir
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
@@ -58,13 +57,13 @@ def download_paper_file(paper_id: str, db: Session = Depends(get_db)) -> FileRes
     )
 
 
-@router.get("/{paper_id}/document", response_model=Document)
-def get_document(paper_id: str, db: Session = Depends(get_db)) -> Document:
+@router.get("/{paper_id}/document")
+def get_document(paper_id: str, db: Session = Depends(get_db)) -> FileResponse:
     papers_service.get_paper(db, paper_id)
-    doc = load_document(paper_id)
-    if doc is None:
+    path = document_path(paper_id)
+    if not path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档尚未解析完成")
-    return doc
+    return FileResponse(path, media_type="application/json")
 
 
 @router.post("/{paper_id}/parse", response_model=JobOut, status_code=202)

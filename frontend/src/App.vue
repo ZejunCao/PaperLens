@@ -12,6 +12,10 @@ const mobileOpen = ref(false)
 const sidebarHover = ref(false)
 
 const isReader = computed(() => route.name === 'reader')
+const headerTitle = computed(() => (route.name === 'settings' ? '设置' : '论文库'))
+const headerSub = computed(() =>
+  route.name === 'settings' ? 'OpenAI 兼容接口与模型' : '上传、管理并打开本地论文',
+)
 const sidebarExpanded = computed(() => sidebarHover.value)
 
 onMounted(() => {
@@ -67,8 +71,8 @@ onMounted(() => {
             <Menu class="h-5 w-5" />
           </button>
           <div class="min-w-0">
-            <p class="truncate text-sm font-semibold tracking-tight">论文库</p>
-            <p class="truncate text-xs text-muted-foreground">上传、管理并打开本地论文</p>
+            <p class="truncate text-sm font-semibold tracking-tight">{{ headerTitle }}</p>
+            <p class="truncate text-xs text-muted-foreground">{{ headerSub }}</p>
           </div>
         </div>
       </header>

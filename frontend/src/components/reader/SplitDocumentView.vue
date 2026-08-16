@@ -4,9 +4,13 @@ import { AlertCircle, Loader2, RefreshCw } from 'lucide-vue-next'
 import LayoutPage from '@/components/reader/LayoutPage.vue'
 import KatexView from '@/components/reader/KatexView.vue'
 import { fetchDocument, fetchPaper, paperAssetUrl, retryParse } from '@/api/papers'
-import type { ContentBlock, DocumentModel } from '@/types/document'
+import { fetchTranslations, translatePaperPage } from '@/api/settings'
+import type { ContentBlock, DocumentModel, Sentence } from '@/types/document'
+import type { PageTranslation } from '@/types/translation'
 import type { Paper } from '@/types'
 import { STATUS_LABEL } from '@/types'
+import { splitInlineMath, type RichChunk } from '@/lib/inlineMath'
+import { decodeSentRanges, textNodeOfEl } from '@/lib/sentenceLayout'
 
 const props = withDefaults(
   defineProps<{
@@ -38,8 +42,16 @@ const documentModel = ref<DocumentModel | null>(null)
 const loading = ref(true)
 const error = ref('')
 const retrying = ref(false)
+const currentPage = ref(1)
+const llmConfigured = ref(false)
+const translationPages = ref<Record<string, PageTranslation>>({})
+const translatingPage = ref<number | null>(null)
+let hoverClearTimer: ReturnType<typeof setTimeout> | null = null
+let hoveredSentenceId: string | null = null
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let dwellTimer: ReturnType<typeof setTimeout> | null = null
+let translateAbort: AbortController | null = null
 let scrollRaf = 0
 let resizeObserver: ResizeObserver | null = null
 
@@ -87,6 +99,7 @@ async function loadDocumentIfReady() {
     resizeObserver.observe(scrollRef.value)
   }
   updateCurrentPageFromScroll()
+  void loadTranslations().then(() => scheduleTranslate(currentPage.value))
 }
 
 async function bootstrap() {
@@ -117,6 +130,7 @@ async function onRetry() {
     await retryParse(props.paperId)
     await refreshPaper()
     documentModel.value = null
+    translationPages.value = {}
     startPolling()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -165,11 +179,40 @@ function updateCurrentPageFromScroll() {
     page = i + 1
   }
   emit('update:page', page)
+  if (currentPage.value !== page) {
+    currentPage.value = page
+    scheduleTranslate(page)
+  }
 }
 
 function onScroll() {
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
   scrollRaf = requestAnimationFrame(updateCurrentPageFromScroll)
+}
+
+function wheelDeltaY(e: WheelEvent): number {
+  if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) return e.deltaY * 16
+  if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return e.deltaY * (scrollRef.value?.clientHeight ?? 400)
+  }
+  return e.deltaY
+}
+
+/** 右栏滚到当页顶/底后，继续滚轮则带动整页（左右一起）翻页 */
+function onRightPaneWheel(e: WheelEvent) {
+  const pane = e.currentTarget as HTMLElement | null
+  const outer = scrollRef.value
+  if (!pane || !outer || e.deltaY === 0) return
+  const dy = wheelDeltaY(e)
+  const overflowing = pane.scrollHeight > pane.clientHeight + 1
+  if (overflowing) {
+    const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 1
+    const atTop = pane.scrollTop <= 1
+    if (dy > 0 && !atBottom) return
+    if (dy < 0 && !atTop) return
+  }
+  e.preventDefault()
+  outer.scrollTop += dy
 }
 
 function scrollToPage(page: number) {
@@ -182,6 +225,231 @@ function scrollToPage(page: number) {
   }
   el.scrollTo({ top, behavior: 'auto' })
   emit('update:page', target)
+  currentPage.value = target
+  scheduleTranslate(target)
+}
+
+async function loadTranslations() {
+  try {
+    const data = await fetchTranslations(props.paperId)
+    llmConfigured.value = data.configured
+    translationPages.value = data.pages || {}
+  } catch {
+    llmConfigured.value = false
+  }
+}
+
+function stopTranslate() {
+  if (dwellTimer) {
+    clearTimeout(dwellTimer)
+    dwellTimer = null
+  }
+  translateAbort?.abort()
+  translateAbort = null
+}
+
+function scheduleTranslate(page: number) {
+  stopTranslate()
+  const key = String(page)
+  const cached = translationPages.value[key]
+  if (cached?.status === 'ready') return
+  if (!llmConfigured.value) return
+  dwellTimer = setTimeout(() => {
+    void runTranslate(page)
+  }, 1000)
+}
+
+async function runTranslate(page: number) {
+  const key = String(page)
+  if (translationPages.value[key]?.status === 'ready') return
+  translatingPage.value = page
+  translateAbort = new AbortController()
+  try {
+    const data = await translatePaperPage(props.paperId, page, translateAbort.signal)
+    llmConfigured.value = data.configured
+    translationPages.value = data.pages || {}
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') return
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes('尚未配置')) {
+      llmConfigured.value = false
+      return
+    }
+    const pagesMap = { ...translationPages.value }
+    pagesMap[key] = {
+      status: 'failed',
+      error: msg,
+      sentences: pagesMap[key]?.sentences || {},
+    }
+    translationPages.value = pagesMap
+  } finally {
+    if (translatingPage.value === page) translatingPage.value = null
+  }
+}
+
+function sentenceView(pageNo: number, sent: Sentence): { text: string; pending: boolean } {
+  const zh = translationPages.value[String(pageNo)]?.sentences?.[sent.id]
+  if (zh) return { text: zh, pending: false }
+  const pending =
+    translatingPage.value === pageNo || translationPages.value[String(pageNo)]?.status === 'pending'
+  return { text: sent.text, pending }
+}
+
+function blockSentenceParts(pageNo: number, block: ContentBlock) {
+  const parts = (block.sentences || []).map((sent) => sentenceView(pageNo, sent))
+  return {
+    parts,
+    pending: parts.some((p) => p.pending),
+  }
+}
+
+function blockDisplay(pageNo: number, block: ContentBlock): { text: string; pending: boolean } {
+  const { parts, pending } = blockSentenceParts(pageNo, block)
+  if (!parts.length) return { text: block.source_text || '', pending: false }
+  let text = ''
+  for (let i = 0; i < parts.length; i++) {
+    if (i) text += joinGap(parts[i - 1]!.text, parts[i]!.text)
+    text += parts[i]!.text
+  }
+  return { text, pending }
+}
+
+function blockRichChunks(pageNo: number, block: ContentBlock): RichChunk[] {
+  const segs = block.segments || []
+  const hasMathSeg = segs.some((s) => s.kind === 'math' && (s.latex || '').trim())
+  const hasZh = (block.sentences || []).some(
+    (s) => !!translationPages.value[String(pageNo)]?.sentences?.[s.id],
+  )
+  if (!hasZh && hasMathSeg) {
+    return segs
+      .map((seg) => {
+        if (seg.kind === 'math' && (seg.latex || '').trim()) {
+          return { kind: 'math' as const, text: seg.latex || '', display: !!seg.display }
+        }
+        const t = (seg.text || '').trim() ? seg.text || '' : ''
+        return t ? { kind: 'text' as const, text: t } : null
+      })
+      .filter((c): c is RichChunk => !!c)
+  }
+  const raw =
+    (block.sentences || []).length > 0
+      ? blockDisplay(pageNo, block).text
+      : block.source_text || segs.map((s) => s.text || s.latex || '').join('')
+  return splitInlineMath(raw)
+}
+
+function applySentenceHover(id: string | null) {
+  if (id === hoveredSentenceId) return
+  const root = scrollRef.value
+  if (root) {
+    root.querySelectorAll('.sentence-hit').forEach((el) => el.classList.remove('sentence-hit'))
+    root.querySelectorAll('.sentence-hit-ov').forEach((el) => el.remove())
+  }
+  hoveredSentenceId = id
+  if (!id || !root) return
+  root.querySelectorAll('[data-sentence-id]').forEach((node) => {
+    const el = node as HTMLElement
+    const ranges = decodeSentRanges(el.dataset.sentRanges).filter((r) => r.id === id)
+    const ids = `${el.dataset.sentenceIds || ''},${el.dataset.sentenceId || ''}`
+    if (!ranges.length && !ids.split(',').includes(id)) return
+    const tn = textNodeOfEl(el)
+    const textLen = (tn?.length ?? el.textContent?.length ?? 0)
+    const partial =
+      ranges.length > 0 && ranges.some((r) => r.start > 0 || r.end < textLen)
+    if (tn && partial) {
+      paintSentenceOverlays(el, ranges)
+      return
+    }
+    el.classList.add('sentence-hit')
+  })
+}
+
+function paintSentenceOverlays(el: HTMLElement, ranges: { start: number; end: number }[]) {
+  const tn = textNodeOfEl(el)
+  const host = el.closest('[data-layout-root]') as HTMLElement | null
+  if (!tn || !host) {
+    el.classList.add('sentence-hit')
+    return
+  }
+  const hb = host.getBoundingClientRect()
+  const range = document.createRange()
+  for (const r of ranges) {
+    const a = Math.max(0, r.start)
+    const b = Math.min(tn.length, r.end)
+    if (b <= a) continue
+    range.setStart(tn, a)
+    range.setEnd(tn, b)
+    for (const rect of range.getClientRects()) {
+      if (rect.width < 0.5 || rect.height < 0.5) continue
+      const ov = document.createElement('div')
+      ov.className = 'sentence-hit-ov'
+      ov.style.left = `${rect.left - hb.left}px`
+      ov.style.top = `${rect.top - hb.top}px`
+      ov.style.width = `${rect.width}px`
+      ov.style.height = `${Math.max(rect.height, 2)}px`
+      host.appendChild(ov)
+    }
+  }
+}
+
+function setHoveredSentence(id: string | null) {
+  if (hoverClearTimer) {
+    clearTimeout(hoverClearTimer)
+    hoverClearTimer = null
+  }
+  if (id) {
+    applySentenceHover(id)
+    return
+  }
+  hoverClearTimer = setTimeout(() => {
+    applySentenceHover(null)
+    hoverClearTimer = null
+  }, 40)
+}
+
+type SentencePart = {
+  id: string
+  gap: string
+  chunks: RichChunk[]
+  pending: boolean
+}
+
+function sentenceRenderParts(pageNo: number, block: ContentBlock): SentencePart[] {
+  const sents = [...(block.sentences || [])].sort((a, b) => a.order - b.order)
+  if (!sents.length) {
+    const chunks = blockRichChunks(pageNo, block)
+    if (!chunks.length) return []
+    return [{ id: `block:${block.id}`, gap: '', chunks, pending: false }]
+  }
+  const parts: SentencePart[] = []
+  for (let i = 0; i < sents.length; i++) {
+    const sent = sents[i]!
+    const view = sentenceView(pageNo, sent)
+    const gap = i ? joinGap(sentenceView(pageNo, sents[i - 1]!).text, view.text) : ''
+    parts.push({
+      id: sent.id,
+      gap,
+      chunks: splitInlineMath(view.text),
+      pending: view.pending,
+    })
+  }
+  return parts
+}
+
+function joinGap(prev: string, next: string): string {
+  if (!prev) return ''
+  if (/[\u4e00-\u9fff。！？；：]$/.test(prev.trim()) && /^[\u4e00-\u9fff「“（]/.test(next.trim())) {
+    return ''
+  }
+  return ' '
+}
+
+function blockTypeClass(block: ContentBlock) {
+  return {
+    'text-lg font-semibold': block.type === 'title',
+    'font-semibold': block.type === 'section',
+    'text-sm italic text-muted-foreground': block.type === 'caption' || isFigureCaption(block),
+  }
 }
 
 function pageBlocks(pageNo: number): ContentBlock[] {
@@ -195,9 +463,43 @@ function figureSrc(block: ContentBlock): string | null {
   return typeof path === 'string' && path ? paperAssetUrl(props.paperId, path) : null
 }
 
+function figureStyle(block: ContentBlock) {
+  const [x0 = 0, y0 = 0, x1 = 0, y1 = 0] = block.bbox ?? []
+  const w = Math.max(1, (x1 - x0) * renderScale.value)
+  const h = Math.max(1, (y1 - y0) * renderScale.value)
+  return {
+    width: `${w}px`,
+    maxWidth: '100%',
+    aspectRatio: `${w} / ${h}`,
+    height: 'auto',
+    objectFit: 'contain' as const,
+  }
+}
+
+function figureIsCentered(block: ContentBlock, pageWidth: number): boolean {
+  const [x0 = 0, , x1 = 0] = block.bbox ?? []
+  if (pageWidth <= 0) return true
+  const left = x0
+  const right = pageWidth - x1
+  return Math.abs(left - right) < Math.max(18, pageWidth * 0.06)
+}
+
+function isFigureCaption(block: ContentBlock): boolean {
+  if (block.type === 'caption') return true
+  return /^\s*Figure\s+\d+/i.test(block.source_text || '')
+}
+
+function blockTextAlign(block: ContentBlock, pageWidth: number): string {
+  if (block.type === 'formula') return 'text-center'
+  if (isFigureCaption(block) && figureIsCentered(block, pageWidth)) return 'text-center'
+  return 'text-left'
+}
+
 watch(
   () => props.paperId,
   () => {
+    stopTranslate()
+    translationPages.value = {}
     void bootstrap()
   },
 )
@@ -229,9 +531,11 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopPolling()
+  stopTranslate()
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
   resizeObserver?.disconnect()
   resizeObserver = null
+  if (hoverClearTimer) clearTimeout(hoverClearTimer)
 })
 
 defineExpose({ scrollToPage })
@@ -323,7 +627,12 @@ defineExpose({ scrollToPage })
             :style="{ width: `${leftPct}%` }"
           >
             <div class="relative w-full">
-              <LayoutPage :paper-id="paperId" :page="page" :scale="renderScale" />
+              <LayoutPage
+                :paper-id="paperId"
+                :page="page"
+                :scale="renderScale"
+                @hover-sentence="setHoveredSentence"
+              />
               <div
                 class="pointer-events-none absolute right-2 top-2 rounded bg-black/40 px-1.5 py-0.5 text-[10px] text-white"
               >
@@ -336,48 +645,108 @@ defineExpose({ scrollToPage })
 
           <div class="h-full min-w-0 flex-1 overflow-hidden bg-[#f2ede6] px-1">
             <div class="flex h-full w-full flex-col overflow-hidden bg-white shadow-sm ring-1 ring-black/5">
-              <div class="h-full overflow-y-auto overscroll-contain px-4 py-3">
+              <div
+                class="h-full overflow-y-auto overscroll-contain px-4 py-3"
+                @wheel="onRightPaneWheel"
+              >
                 <template v-if="pageBlocks(page.page).length">
                   <template v-for="block in pageBlocks(page.page)" :key="block.id">
                     <img
                       v-if="block.type === 'figure' && figureSrc(block)"
                       :src="figureSrc(block)!"
                       :alt="`${block.type}-${block.id}`"
-                      class="mb-3 max-w-full rounded-sm border border-border/40 bg-[#faf7f2]"
+                      class="mb-3 rounded-sm border border-border/40 bg-[#faf7f2]"
+                      :class="figureIsCentered(block, page.width) ? 'mx-auto block' : ''"
+                      :style="figureStyle(block)"
                     />
                     <p
-                      v-else-if="block.segments?.length"
-                      class="mb-2 text-left leading-relaxed text-foreground/90"
-                      :class="{
-                        'text-lg font-semibold': block.type === 'title',
-                        'font-semibold': block.type === 'section',
-                        'text-sm italic text-muted-foreground': block.type === 'caption',
-                        'text-center': block.type === 'formula',
-                      }"
-                      :style="{ fontSize: block.type === 'title' ? undefined : `${fontPx}px` }"
+                      v-else-if="block.type === 'formula' && block.segments?.length"
+                      class="mb-2 leading-relaxed text-foreground/90"
+                      :class="blockTextAlign(block, page.width)"
+                      :data-sentence-id="block.sentences?.[0]?.id || `block:${block.id}`"
+                      :style="{ fontSize: `${fontPx}px` }"
+                      @pointerenter="
+                        setHoveredSentence(block.sentences?.[0]?.id || `block:${block.id}`)
+                      "
+                      @pointerleave="setHoveredSentence(null)"
                     >
                       <template v-for="(seg, si) in block.segments" :key="`${block.id}-seg-${si}`">
                         <KatexView
                           v-if="seg.kind === 'math' && seg.latex"
                           class="mx-0.5"
                           :latex="seg.latex"
-                          :display="block.type === 'formula' || !!seg.display"
+                          :display="true"
                           :title="seg.latex"
                         />
                         <span v-else>{{ seg.text }}</span>
                       </template>
                     </p>
+                    <ul
+                      v-else-if="block.type === 'list_item'"
+                      class="mb-2 list-disc pl-5 leading-relaxed text-foreground/90"
+                      :style="{ fontSize: `${fontPx}px` }"
+                    >
+                      <li :class="blockTextAlign(block, page.width)">
+                        <template
+                          v-for="part in sentenceRenderParts(page.page, block)"
+                          :key="part.id"
+                        >
+                          <span v-if="part.gap">{{ part.gap }}</span>
+                          <span
+                            class="sentence-chip rounded-sm"
+                            :data-sentence-id="part.id"
+                            @pointerenter="setHoveredSentence(part.id)"
+                            @pointerleave="setHoveredSentence(null)"
+                          >
+                            <template v-for="(chunk, ci) in part.chunks" :key="`${part.id}-c-${ci}`">
+                              <KatexView
+                                v-if="chunk.kind === 'math'"
+                                class="mx-0.5"
+                                :latex="chunk.text"
+                                :display="!!chunk.display"
+                                :title="chunk.text"
+                              />
+                              <span v-else>{{ chunk.text }}</span>
+                            </template>
+                          </span>
+                        </template>
+                      </li>
+                    </ul>
                     <p
-                      v-else-if="block.source_text"
-                      class="mb-2 text-left leading-relaxed text-foreground/90"
-                      :class="{
-                        'text-lg font-semibold': block.type === 'title',
-                        'font-semibold': block.type === 'section',
-                        'text-sm italic text-muted-foreground': block.type === 'caption',
-                      }"
+                      v-else-if="sentenceRenderParts(page.page, block).length"
+                      class="mb-2 leading-relaxed text-foreground/90"
+                      :class="[blockTextAlign(block, page.width), blockTypeClass(block)]"
                       :style="{ fontSize: block.type === 'title' ? undefined : `${fontPx}px` }"
                     >
-                      {{ block.source_text }}
+                      <template
+                        v-for="part in sentenceRenderParts(page.page, block)"
+                        :key="part.id"
+                      >
+                        <span v-if="part.gap">{{ part.gap }}</span>
+                        <span
+                          class="sentence-chip rounded-sm"
+                          :data-sentence-id="part.id"
+                          @pointerenter="setHoveredSentence(part.id)"
+                          @pointerleave="setHoveredSentence(null)"
+                        >
+                          <template v-for="(chunk, ci) in part.chunks" :key="`${part.id}-c-${ci}`">
+                            <KatexView
+                              v-if="chunk.kind === 'math'"
+                              class="mx-0.5"
+                              :latex="chunk.text"
+                              :display="!!chunk.display"
+                              :title="chunk.text"
+                            />
+                            <span v-else>{{ chunk.text }}</span>
+                          </template>
+                        </span>
+                      </template>
+                      <span
+                        v-if="blockDisplay(page.page, block).pending"
+                        class="ml-1 text-[10px] text-muted-foreground/70"
+                      >
+                        翻译中
+                      </span>
                     </p>
                   </template>
                 </template>
@@ -390,3 +759,21 @@ defineExpose({ scrollToPage })
     </div>
   </div>
 </template>
+
+<style scoped>
+.sentence-hit,
+.sentence-chip.sentence-hit,
+:deep(.sentence-hit) {
+  background-color: rgb(253 224 71 / 0.42);
+  box-shadow: 0 0 0 2px rgb(245 158 11 / 0.28);
+  border-radius: 2px;
+}
+:deep(.sentence-hit-ov) {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: 2px;
+  background-color: rgb(253 224 71 / 0.42);
+  box-shadow: 0 0 0 1px rgb(245 158 11 / 0.2);
+}
+</style>

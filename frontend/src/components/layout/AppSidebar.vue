@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useRoute, useRouter } from 'vue-router'
-import { BookOpen, Library } from 'lucide-vue-next'
+import { BookOpen, Library, Settings } from 'lucide-vue-next'
 import { cn } from '@/lib/utils'
 
 defineProps<{
@@ -16,7 +16,10 @@ const emit = defineEmits<{
 const route = useRoute()
 const router = useRouter()
 
-const navItems = [{ label: '论文库', icon: Library, path: '/' }]
+const navItems = [
+  { label: '论文库', icon: Library, path: '/', name: 'library' },
+  { label: '设置', icon: Settings, path: '/settings', name: 'settings' },
+]
 
 function go(path: string) {
   if (route.path !== path) router.push(path)
@@ -86,7 +89,7 @@ function go(path: string) {
           cn(
             'flex items-center gap-3 rounded-xl py-2.5 text-sm transition-colors',
             collapsed ? 'h-10 w-10 justify-center px-0' : 'px-3',
-            route.path === item.path || route.name === 'library'
+            route.name === item.name
               ? 'bg-primary/12 font-medium text-primary'
               : 'text-muted-foreground hover:bg-accent hover:text-foreground',
           )
