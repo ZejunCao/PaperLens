@@ -1,0 +1,185 @@
+"""Milestone 0/1 API smoke tests."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.database import Base, get_db
+from app.main import create_app
+
+
+@pytest.fixture()
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    db_path = tmp_path / "test.db"
+    uploads = tmp_path / "uploads"
+    papers = tmp_path / "papers"
+    uploads.mkdir()
+    papers.mkdir()
+
+    monkeypatch.setenv("PAPERLENS_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setenv("PAPERLENS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PAPERLENS_UPLOADS_DIR", str(uploads))
+    monkeypatch.setenv("PAPERLENS_PAPERS_DIR", str(papers))
+    monkeypatch.setenv("PAPERLENS_DISABLE_WORKER", "true")
+    monkeypatch.setenv("PAPERLENS_PARSER", "pymupdf")
+
+    from app.config import get_settings
+    from app.models import Job, Paper  # noqa: F401
+    from app.workers.parse_worker import stop_worker
+
+    get_settings.cache_clear()
+    settings = get_settings()
+    settings.data_dir = tmp_path
+    settings.uploads_dir = uploads
+    settings.papers_dir = papers
+    settings.database_url = f"sqlite:///{db_path.as_posix()}"
+    settings.disable_worker = True
+
+    engine = create_engine(
+        settings.database_url,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    Base.metadata.create_all(bind=engine)
+
+    # 让 worker 辅助函数也能打到同一内存/文件库
+    import app.database as dbmod
+
+    dbmod.engine = engine
+    dbmod.SessionLocal = TestingSession
+
+    app = create_app()
+
+    def _override_db():
+        db = TestingSession()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _override_db
+    with TestClient(app) as c:
+        yield c, TestingSession
+    stop_worker()
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()
+
+
+def _minimal_pdf() -> bytes:
+    return b"""%PDF-1.1
+1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj
+2 0 obj<< /Type /Pages /Kids [3 0 R] /Count 1 >>endobj
+3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] >>endobj
+xref
+0 4
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+trailer<< /Size 4 /Root 1 0 R >>
+startxref
+190
+%%EOF
+"""
+
+
+def _text_pdf(tmp_path: Path) -> Path:
+    import fitz
+
+    path = tmp_path / "sample.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=500)
+    page.insert_text((72, 72), "Hello PaperLens Parsing.", fontsize=14)
+    page.insert_text((72, 120), "This is a second sentence for structure.", fontsize=11)
+    doc.save(path.as_posix())
+    doc.close()
+    return path
+
+
+def test_health(client):
+    c, _ = client
+    res = c.get("/api/health")
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"
+
+
+def test_upload_list_rename_delete(client):
+    c, _ = client
+    pdf = _minimal_pdf()
+    res = c.post(
+        "/api/papers",
+        files={"file": ("demo.pdf", pdf, "application/pdf")},
+    )
+    assert res.status_code == 201, res.text
+    paper = res.json()
+    assert paper["filename"] == "demo.pdf"
+    assert paper["status"] == "queued"
+    paper_id = paper["id"]
+
+    dup = c.post(
+        "/api/papers",
+        files={"file": ("demo2.pdf", pdf, "application/pdf")},
+    )
+    assert dup.status_code == 409
+
+    listed = c.get("/api/papers")
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+
+    renamed = c.patch(f"/api/papers/{paper_id}", json={"title": "演示论文"})
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "演示论文"
+
+    file_res = c.get(f"/api/papers/{paper_id}/file")
+    assert file_res.status_code == 200
+    assert file_res.headers["content-type"].startswith("application/pdf")
+
+    deleted = c.delete(f"/api/papers/{paper_id}")
+    assert deleted.status_code == 204
+    assert c.get("/api/papers").json()["total"] == 0
+
+
+def test_reject_non_pdf(client):
+    c, _ = client
+    res = c.post(
+        "/api/papers",
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    assert res.status_code == 400
+
+
+def test_parse_document(client, tmp_path: Path):
+    from app.workers.parse_worker import _process_one
+
+    c, _ = client
+    path = _text_pdf(tmp_path)
+    with path.open("rb") as f:
+        res = c.post(
+            "/api/papers",
+            files={"file": ("sample.pdf", f.read(), "application/pdf")},
+        )
+    assert res.status_code == 201, res.text
+    paper_id = res.json()["id"]
+
+    assert _process_one() is True
+    meta = c.get(f"/api/papers/{paper_id}").json()
+    assert meta["status"] == "ready", meta.get("error_message")
+
+    doc = c.get(f"/api/papers/{paper_id}/document")
+    assert doc.status_code == 200
+    body = doc.json()
+    assert body["page_count"] >= 1
+    assert body["blocks"]
+    assert any("Hello PaperLens" in (b.get("source_text") or "") for b in body["blocks"])
+
+    retry = c.post(f"/api/papers/{paper_id}/parse")
+    assert retry.status_code == 202
+    assert _process_one() is True
+    assert c.get(f"/api/papers/{paper_id}").json()["status"] == "ready"

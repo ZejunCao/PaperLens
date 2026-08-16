@@ -1,0 +1,106 @@
+{
+  "pdf_info": [
+    {
+      "page_idx": 0,
+      "page_size": [612.0, 792.0],
+      "para_blocks": [
+        {
+          "type": "title",
+          "bbox": [50, 40, 560, 80],
+          "level": 1,
+          "lines": [
+            {
+              "bbox": [50, 40, 560, 80],
+              "spans": [
+                {
+                  "bbox": [50, 40, 560, 80],
+                  "type": "text",
+                  "content": "The response of Flow Duration curves"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "bbox": [50, 100, 560, 160],
+          "lines": [
+            {
+              "bbox": [50, 100, 400, 130],
+              "spans": [
+                {
+                  "bbox": [50, 100, 280, 130],
+                  "type": "text",
+                  "content": "Let "
+                },
+                {
+                  "bbox": [280, 100, 340, 130],
+                  "type": "inline_equation",
+                  "content": "x = 1"
+                },
+                {
+                  "bbox": [340, 100, 560, 130],
+                  "type": "text",
+                  "content": " be the start."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "image",
+          "bbox": [80, 200, 500, 420],
+          "blocks": [
+            {
+              "type": "image_body",
+              "bbox": [80, 200, 500, 380],
+              "lines": [
+                {
+                  "spans": [
+                    {
+                      "type": "image",
+                      "bbox": [80, 200, 500, 380],
+                      "image_path": "images/fig_abc.png"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "image_caption",
+              "bbox": [80, 385, 500, 420],
+              "lines": [
+                {
+                  "spans": [
+                    {
+                      "type": "text",
+                      "bbox": [80, 385, 500, 420],
+                      "content": "Figure 1. Example plot."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "interline_equation",
+          "bbox": [120, 450, 480, 500],
+          "lines": [
+            {
+              "spans": [
+                {
+                  "type": "interline_equation",
+                  "bbox": [120, 450, 480, 500],
+                  "content": "E = mc^2"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "_backend": "pipeline",
+  "_version_name": "test"
+}

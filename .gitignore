@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 运行时数据
+data/*
+!data/.gitkeep
+
+# 本地模型与缓存（勿提交）
+models/
+.cache/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE / OS / 编辑器
+.idea/
+.vscode/
+.cursor/
+*.swp
+.DS_Store
+Thumbs.db
+.ipynb_checkpoints/
+
+# 环境与密钥
+.env
+.env.*
+!.env.example
+data/llm_config.json
