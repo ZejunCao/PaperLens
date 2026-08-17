@@ -30,6 +30,7 @@ def create_app() -> FastAPI:
             "http://127.0.0.1:5173",
             "http://localhost:5173",
         ],
+        allow_origin_regex=r"https?://[^/]+",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

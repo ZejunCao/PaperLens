@@ -17,8 +17,8 @@ venv/
 data/*
 !data/.gitkeep
 
-# 本地模型与缓存（勿提交）
-models/
+# 仓库根目录的本地权重与缓存（勿提交；不要写成 models/，否则会误伤 app/models）
+/models/
 .cache/
 
 # 前端

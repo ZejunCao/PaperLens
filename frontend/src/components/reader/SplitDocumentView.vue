@@ -54,6 +54,13 @@ let dwellTimer: ReturnType<typeof setTimeout> | null = null
 let translateAbort: AbortController | null = null
 let scrollRaf = 0
 let resizeObserver: ResizeObserver | null = null
+const spacePressed = ref(false)
+const panning = ref(false)
+let panPointerId: number | null = null
+let panStartX = 0
+let panStartY = 0
+let panScrollLeft = 0
+let panScrollTop = 0
 
 const leftPct = computed(() => Math.min(80, Math.max(20, props.splitPercent)))
 const fontPx = computed(() => Math.round(14 * props.fontScale))
@@ -77,6 +84,19 @@ function updateFitScale() {
   if (Math.abs(next - fitScale.value) > 0.001) {
     fitScale.value = next
     emit('update:fit-scale', next)
+  }
+}
+
+function leftPaneEls(): HTMLElement[] {
+  const root = scrollRef.value
+  if (!root) return []
+  return [...root.querySelectorAll<HTMLElement>('[data-left-pane]')]
+}
+
+function syncLeftScroll(from?: HTMLElement) {
+  const x = from?.scrollLeft ?? leftPaneEls()[0]?.scrollLeft ?? 0
+  for (const pane of leftPaneEls()) {
+    if (pane !== from) pane.scrollLeft = x
   }
 }
 
@@ -188,6 +208,62 @@ function updateCurrentPageFromScroll() {
 function onScroll() {
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
   scrollRaf = requestAnimationFrame(updateCurrentPageFromScroll)
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  const tag = el?.tagName
+  return !!el && (tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable)
+}
+
+function onWindowKeydown(e: KeyboardEvent) {
+  if (e.code !== 'Space' || isTypingTarget(e.target) || e.repeat) return
+  e.preventDefault()
+  spacePressed.value = true
+}
+
+function onWindowKeyup(e: KeyboardEvent) {
+  if (e.code !== 'Space') return
+  spacePressed.value = false
+  stopPan()
+}
+
+function startPan(e: PointerEvent) {
+  const pane = (e.currentTarget as HTMLElement | null)?.closest?.('[data-left-pane]') as HTMLElement | null
+  const outer = scrollRef.value
+  if (!pane || !outer || !spacePressed.value || e.button !== 0) return
+  e.preventDefault()
+  e.stopPropagation()
+  panning.value = true
+  panPointerId = e.pointerId
+  panStartX = e.clientX
+  panStartY = e.clientY
+  panScrollLeft = pane.scrollLeft
+  panScrollTop = outer.scrollTop
+  pane.setPointerCapture(e.pointerId)
+}
+
+function movePan(e: PointerEvent) {
+  const pane = e.currentTarget as HTMLElement | null
+  const outer = scrollRef.value
+  if (!pane || !outer || !panning.value || panPointerId !== e.pointerId) return
+  e.preventDefault()
+  pane.scrollLeft = panScrollLeft - (e.clientX - panStartX)
+  syncLeftScroll(pane)
+  outer.scrollTop = panScrollTop - (e.clientY - panStartY)
+}
+
+function stopPan(e?: PointerEvent) {
+  const pane = e?.currentTarget as HTMLElement | undefined
+  if (pane && e && panPointerId === e.pointerId && pane.hasPointerCapture?.(e.pointerId)) {
+    pane.releasePointerCapture(e.pointerId)
+  }
+  panning.value = false
+  panPointerId = null
+}
+
+function onLeftPaneScroll(e: Event) {
+  syncLeftScroll(e.currentTarget as HTMLElement)
 }
 
 function wheelDeltaY(e: WheelEvent): number {
@@ -516,6 +592,8 @@ onMounted(async () => {
   await bootstrap()
   await nextTick()
   updateFitScale()
+  window.addEventListener('keydown', onWindowKeydown)
+  window.addEventListener('keyup', onWindowKeyup)
   if (typeof ResizeObserver !== 'undefined' && scrollRef.value) {
     let roRaf = 0
     resizeObserver = new ResizeObserver(() => {
@@ -532,10 +610,13 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopPolling()
   stopTranslate()
+  stopPan()
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
   resizeObserver?.disconnect()
   resizeObserver = null
   if (hoverClearTimer) clearTimeout(hoverClearTimer)
+  window.removeEventListener('keydown', onWindowKeydown)
+  window.removeEventListener('keyup', onWindowKeyup)
 })
 
 defineExpose({ scrollToPage })
@@ -608,14 +689,14 @@ defineExpose({ scrollToPage })
     <div
       v-else
       ref="scrollRef"
-      class="min-h-0 flex-1 overflow-auto"
+      class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
       @scroll="onScroll"
     >
       <div class="w-full py-3">
         <div
           v-for="page in pages"
           :key="`row-${page.page}`"
-          class="flex w-full"
+          class="flex w-full min-w-0"
           :data-page="page.page"
           :style="{
             height: `${page.height * renderScale}px`,
@@ -623,10 +704,23 @@ defineExpose({ scrollToPage })
           }"
         >
           <div
-            class="flex h-full items-start justify-center overflow-hidden bg-[#f2ede6] px-1"
+            data-left-pane
+            class="h-full min-w-0 overflow-x-auto overflow-y-hidden bg-[#f2ede6] px-1"
+            :class="spacePressed ? (panning ? 'cursor-grabbing select-none' : 'cursor-grab') : ''"
             :style="{ width: `${leftPct}%` }"
+            @scroll="onLeftPaneScroll"
+            @pointerdown.capture="startPan"
+            @pointermove="movePan"
+            @pointerup="stopPan"
+            @pointercancel="stopPan"
           >
-            <div class="relative w-full">
+            <div
+              class="relative mx-auto"
+              :style="{
+                width: `${page.width * renderScale}px`,
+                height: `${page.height * renderScale}px`,
+              }"
+            >
               <LayoutPage
                 :paper-id="paperId"
                 :page="page"
@@ -661,7 +755,7 @@ defineExpose({ scrollToPage })
                     />
                     <p
                       v-else-if="block.type === 'formula' && block.segments?.length"
-                      class="mb-2 leading-relaxed text-foreground/90"
+                      class="mb-5 leading-[1.8] text-foreground/90"
                       :class="blockTextAlign(block, page.width)"
                       :data-sentence-id="block.sentences?.[0]?.id || `block:${block.id}`"
                       :style="{ fontSize: `${fontPx}px` }"
@@ -683,7 +777,7 @@ defineExpose({ scrollToPage })
                     </p>
                     <ul
                       v-else-if="block.type === 'list_item'"
-                      class="mb-2 list-disc pl-5 leading-relaxed text-foreground/90"
+                      class="mb-5 list-disc pl-5 leading-[1.8] text-foreground/90"
                       :style="{ fontSize: `${fontPx}px` }"
                     >
                       <li :class="blockTextAlign(block, page.width)">
@@ -714,7 +808,7 @@ defineExpose({ scrollToPage })
                     </ul>
                     <p
                       v-else-if="sentenceRenderParts(page.page, block).length"
-                      class="mb-2 leading-relaxed text-foreground/90"
+                      class="mb-5 leading-[1.8] text-foreground/90"
                       :class="[blockTextAlign(block, page.width), blockTypeClass(block)]"
                       :style="{ fontSize: block.type === 'title' ? undefined : `${fontPx}px` }"
                     >

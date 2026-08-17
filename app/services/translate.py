@@ -119,6 +119,7 @@ def _chat_translate(items: list[tuple[str, str]], cfg: dict) -> dict[str, str]:
         "model": model,
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
+        "thinking": {"type": "disabled"},
         "messages": [
             {
                 "role": "system",
@@ -142,9 +143,14 @@ def _chat_translate(items: list[tuple[str, str]], cfg: dict) -> dict[str, str]:
     try:
         with httpx.Client(timeout=120.0) as client:
             resp = client.post(url, headers=headers, json=body)
-            if resp.status_code == 400 and "response_format" in body:
-                body.pop("response_format", None)
-                resp = client.post(url, headers=headers, json=body)
+            if resp.status_code == 400:
+                dropped = False
+                for extra in ("response_format", "thinking"):
+                    if extra in body:
+                        body.pop(extra)
+                        dropped = True
+                if dropped:
+                    resp = client.post(url, headers=headers, json=body)
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPStatusError as e:

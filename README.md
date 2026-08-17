@@ -46,8 +46,8 @@ chmod +x start_all.sh
 
 | 服务 | 地址 |
 |------|------|
-| 后端 API | http://127.0.0.1:8000 |
-| 前端 | http://127.0.0.1:5173 |
+| 后端 API | http://0.0.0.0:8000 |
+| 前端 | http://0.0.0.0:5173 |
 
 无 GPU、或不装 MinerU 时：`.env` 里设 `PAPERLENS_PARSER=pymupdf`，并只执行 `uv sync`（不要 `--extra mineru`）。
 

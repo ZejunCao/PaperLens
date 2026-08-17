@@ -180,6 +180,15 @@ def split_line_by_pdf_styles(
     return [_span_from_pdf_group(parts, txt) for (_, parts), txt in zip(groups, texts)]
 
 
+def _origin_fits_line(origin_y: float, line_bbox: list[float], font_size: float | None) -> bool:
+    """基线必须落在 MinerU 行框内，避免把上一行 origin_y 贴到下一行导致叠字。"""
+    if len(line_bbox) < 4:
+        return False
+    y0, y1 = float(line_bbox[1]), float(line_bbox[3])
+    size = max(float(font_size or 0), y1 - y0, 1.0)
+    return y0 - 1.0 <= origin_y <= y1 + size * 0.3
+
+
 def style_from_pdf_spans(
     line_bbox: list[float],
     pdf_spans: list[dict[str, Any]],
@@ -187,7 +196,13 @@ def style_from_pdf_spans(
     pad: float = 4.0,
 ) -> dict[str, Any] | None:
     """在行框内找 PDF span，取字符最多的那一截作为主字号。"""
-    hits = _hits_in_bbox(line_bbox, pdf_spans, pad)
+    line_cy = (line_bbox[1] + line_bbox[3]) / 2.0
+    y_tol = max(3.5, (line_bbox[3] - line_bbox[1]) * 0.55)
+    hits = [
+        sp
+        for sp in _hits_in_bbox(line_bbox, pdf_spans, min(pad, 1.5))
+        if abs(_center(sp["bbox"])[1] - line_cy) <= y_tol
+    ]
     if not hits:
         return None
     weighted = [(max(len(str(sp.get("text") or "").strip()), 1), sp) for sp in hits]
@@ -220,7 +235,9 @@ def _apply_style(span: TextSpan, style: dict[str, Any]) -> None:
     if style.get("color") is not None:
         span.color = int(style["color"])
     if style.get("origin_y") is not None:
-        span.origin_y = float(style["origin_y"])
+        oy = float(style["origin_y"])
+        if _origin_fits_line(oy, span.bbox, span.font_size):
+            span.origin_y = oy
     if style.get("ascender") is not None:
         span.ascender = float(style["ascender"])
 

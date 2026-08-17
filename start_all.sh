@@ -4,7 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-uv sync
+if [[ -f .env ]] && grep -E '^[[:space:]]*PAPERLENS_PARSER=pymupdf([[:space:]]|$)' .env >/dev/null 2>&1; then
+  uv sync
+else
+  uv sync --extra mineru
+fi
 uv run alembic upgrade head
 
 cleanup() {
@@ -13,7 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 &
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 &
 BACKEND_PID=$!
 
 (
@@ -23,6 +27,6 @@ BACKEND_PID=$!
 ) &
 FRONTEND_PID=$!
 
-echo "后端: http://127.0.0.1:8000"
-echo "前端: http://127.0.0.1:5173"
+echo "后端: http://0.0.0.0:8000"
+echo "前端: http://0.0.0.0:5173"
 wait

@@ -143,12 +143,24 @@ function spanCoveredByInlineMath(span: TextSpan): boolean {
   return false
 }
 
+function spanWithinBlock(span: TextSpan, blockBbox: number[]): boolean {
+  if (!span.bbox || span.bbox.length < 4 || blockBbox.length < 4) return true
+  const [bx0, by0, bx1, by1] = blockBbox
+  const [sx0, sy0, sx1, sy1] = span.bbox
+  const cx = (sx0 + sx1) / 2
+  const cy = (sy0 + sy1) / 2
+  const tolY = 10
+  const tolX = 24
+  return cx >= bx0 - tolX && cx <= bx1 + tolX && cy >= by0 - tolY && cy <= by1 + tolY
+}
+
 /** 正文 + 行内公式按阅读顺序排进同一 DOM 流，框选才接近所见即所得 */
 const readingItems = computed(() => {
   const items: LayerItem[] = []
   for (const block of props.page.blocks) {
     if (block.meta?.layout_skip) continue
     for (const span of block.spans) {
+      if (!spanWithinBlock(span, block.bbox)) continue
       if (spanCoveredByInlineMath(span)) continue
       items.push({
         kind: 'text',
@@ -188,7 +200,12 @@ function spanStyle(span: TextSpan) {
   const asc =
     span.ascender && span.ascender > 0 ? Math.min(Math.max(span.ascender, 0.55), 0.95) : 0.8
   let baselineY = y0 + span.font_size * asc
-  if (typeof span.origin_y === 'number') {
+  const y1 = span.bbox[3] ?? y0
+  if (
+    typeof span.origin_y === 'number' &&
+    span.origin_y >= y0 - 1 &&
+    span.origin_y <= y1 + span.font_size * 0.35
+  ) {
     baselineY = span.origin_y
   }
   const top = baselineY * props.scale - sizePx * CSS_ASCENDER

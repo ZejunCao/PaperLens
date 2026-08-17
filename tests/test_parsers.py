@@ -232,6 +232,42 @@ def test_layout_style_from_pdf_spans():
     assert style["font_name"] == "NimbusRomNo9L-Regu"
 
 
+def test_layout_style_ignores_neighbor_line_origin():
+    from app.parsers.layout_enrich import _apply_style, style_from_pdf_spans
+    from app.schemas.document import TextSpan
+
+    pdf_spans = [
+        {
+            "bbox": [52, 211, 300, 219],
+            "size": 8.8,
+            "font": "NimbusRomNo9L-Regu",
+            "origin": [52, 218.64],
+            "text": "tical character recognition (OCR), document restoration, and",
+        },
+        {
+            "bbox": [52, 221, 300, 229],
+            "size": 8.8,
+            "font": "NimbusRomNo9L-Regu",
+            "origin": [52, 228.4],
+            "text": "the evaluation of enhancement systems. We introduce DIQA-",
+        },
+    ]
+    line_bbox = [52.0, 220.0, 300.0, 230.0]
+    style = style_from_pdf_spans(line_bbox, pdf_spans)
+    assert style is not None
+    span = TextSpan(
+        id="sp_test",
+        text="the evaluation of enhancement systems. We introduce DIQA-",
+        bbox=line_bbox,
+        font_size=8.8,
+        origin_y=230.0,
+    )
+    _apply_style(span, {**style, "origin_y": 218.64})
+    assert span.origin_y != 218.64
+    _apply_style(span, style)
+    assert abs((span.origin_y or 0) - 228.4) < 0.2
+
+
 def test_content_list_denormalizes_bbox():
     items = [
         {
