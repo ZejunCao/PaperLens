@@ -23,6 +23,27 @@ function looksLikeLatex(text: string): boolean {
 
 type Unit = { key: string; text: string; y: number; x: number }
 
+/**
+ * 解析器保留了 span 的阅读顺序。若相邻 span 从页面左下明显跳回右上，
+ * 说明同一个段落/句子跨栏；此时不能再单纯按 y 排序。
+ */
+function blockColumnSplit(block: ContentBlock): number | null {
+  const spans = (block.spans || []).filter((span) => span.bbox?.length >= 4)
+  let best: { reset: number; split: number } | null = null
+  for (let i = 1; i < spans.length; i++) {
+    const prev = spans[i - 1]!
+    const next = spans[i]!
+    const [px0 = 0, py0 = 0, px1 = px0] = prev.bbox
+    const [nx0 = 0, ny0 = 0] = next.bbox
+    const verticalReset = py0 - ny0
+    const horizontalJump = nx0 - px0
+    if (verticalReset < 24 || horizontalJump < 80) continue
+    const split = (px1 + nx0) / 2
+    if (!best || verticalReset > best.reset) best = { reset: verticalReset, split }
+  }
+  return best?.split ?? null
+}
+
 function blockUnits(block: ContentBlock): Unit[] {
   const items: Unit[] = []
   for (const span of block.spans || []) {
@@ -44,7 +65,15 @@ function blockUnits(block: ContentBlock): Unit[] {
       x: seg.bbox[0],
     })
   }
-  items.sort((a, b) => (Math.abs(a.y - b.y) > 2 ? a.y - b.y : a.x - b.x))
+  const columnSplit = blockColumnSplit(block)
+  items.sort((a, b) => {
+    if (columnSplit != null) {
+      const aColumn = a.x < columnSplit ? 0 : 1
+      const bColumn = b.x < columnSplit ? 0 : 1
+      if (aColumn !== bColumn) return aColumn - bColumn
+    }
+    return Math.abs(a.y - b.y) > 2 ? a.y - b.y : a.x - b.x
+  })
   return items
 }
 

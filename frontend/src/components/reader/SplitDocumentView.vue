@@ -46,6 +46,7 @@ const currentPage = ref(1)
 const llmConfigured = ref(false)
 const translationPages = ref<Record<string, PageTranslation>>({})
 const translatingPage = ref<number | null>(null)
+const pinnedSentence = ref<{ id: string; page: number; blockId: string; fallback: string } | null>(null)
 let hoverClearTimer: ReturnType<typeof setTimeout> | null = null
 let hoveredSentenceId: string | null = null
 
@@ -217,6 +218,10 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 function onWindowKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && pinnedSentence.value) {
+    clearPinnedSentence()
+    return
+  }
   if (e.code !== 'Space' || isTypingTarget(e.target) || e.repeat) return
   e.preventDefault()
   spacePressed.value = true
@@ -274,31 +279,50 @@ function wheelDeltaY(e: WheelEvent): number {
   return e.deltaY
 }
 
-/** 右栏滚到当页顶/底后，继续滚轮则带动整页（左右一起）翻页 */
+function bindOuterWheel(el: HTMLDivElement | null, prev?: HTMLDivElement | null) {
+  prev?.removeEventListener('wheel', onRightPaneWheel, true)
+  el?.addEventListener('wheel', onRightPaneWheel, { capture: true, passive: false })
+}
+
+/**
+ * 右栏只做一件事：内容溢出则只滚当页，到边吞掉，绝不翻篇。
+ * 内容装得下时右栏本身不是滚动面，滚轮交给整篇。
+ * 不要用超时猜手势结束——触控板惯性间隙会把「页内滑」误判成「翻页」。
+ */
 function onRightPaneWheel(e: WheelEvent) {
-  const pane = e.currentTarget as HTMLElement | null
   const outer = scrollRef.value
-  if (!pane || !outer || e.deltaY === 0) return
-  const dy = wheelDeltaY(e)
+  const pane = (e.target as HTMLElement | null)?.closest?.('[data-right-pane]') as HTMLElement | null
+  if (!outer || !pane || !outer.contains(pane) || e.deltaY === 0) return
+
   const overflowing = pane.scrollHeight > pane.clientHeight + 1
   if (overflowing) {
     const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 1
     const atTop = pane.scrollTop <= 1
-    if (dy > 0 && !atBottom) return
-    if (dy < 0 && !atTop) return
+    const innerCanScroll = e.deltaY > 0 ? !atBottom : !atTop
+    if (!innerCanScroll) e.preventDefault()
+    e.stopPropagation()
+    return
   }
+
   e.preventDefault()
-  outer.scrollTop += dy
+  e.stopPropagation()
+  outer.scrollTop += wheelDeltaY(e)
+}
+
+function pageScrollTop(page: number): number {
+  const target = Math.min(Math.max(1, page), pages.value.length)
+  let top = 0
+  for (let i = 0; i < target - 1; i++) {
+    top += (pages.value[i]?.height ?? 0) * renderScale.value + PAGE_GAP
+  }
+  return top
 }
 
 function scrollToPage(page: number) {
   const el = scrollRef.value
   if (!el || !pages.value.length) return
   const target = Math.min(Math.max(1, page), pages.value.length)
-  let top = 0
-  for (let i = 0; i < target - 1; i++) {
-    top += (pages.value[i]?.height ?? 0) * renderScale.value + PAGE_GAP
-  }
+  const top = pageScrollTop(target)
   el.scrollTo({ top, behavior: 'auto' })
   emit('update:page', target)
   currentPage.value = target
@@ -489,10 +513,55 @@ function setHoveredSentence(id: string | null) {
     return
   }
   hoverClearTimer = setTimeout(() => {
-    applySentenceHover(null)
+    applySentenceHover(pinnedSentence.value?.id ?? null)
     hoverClearTimer = null
   }, 40)
 }
+
+function nodeContainsSentence(el: HTMLElement, id: string): boolean {
+  const ids = `${el.dataset.sentenceIds || ''},${el.dataset.sentenceId || ''}`
+  if (ids.split(',').includes(id)) return true
+  return decodeSentRanges(el.dataset.sentRanges).some((range) => range.id === id)
+}
+
+async function locateSourceSentence(id: string) {
+  await nextTick()
+  const root = scrollRef.value
+  if (!root) return
+  const source = [...root.querySelectorAll<HTMLElement>('[data-left-pane] [data-sentence-id]')].find(
+    (el) => nodeContainsSentence(el, id),
+  )
+  if (!source) return
+  const rootRect = root.getBoundingClientRect()
+  const sourceRect = source.getBoundingClientRect()
+  const top = root.scrollTop + sourceRect.top - rootRect.top - root.clientHeight * 0.42
+  root.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+}
+
+function clearPinnedSentence() {
+  pinnedSentence.value = null
+  applySentenceHover(null)
+}
+
+function togglePinnedSentence(id: string, page: number, block: ContentBlock) {
+  if (window.getSelection()?.toString().trim()) return
+  if (pinnedSentence.value?.id === id) {
+    clearPinnedSentence()
+    return
+  }
+  pinnedSentence.value = { id, page, blockId: block.id, fallback: blockDisplay(page, block).text }
+  applySentenceHover(id)
+  void locateSourceSentence(id)
+}
+
+const pinnedSentenceText = computed(() => {
+  const pinned = pinnedSentence.value
+  if (!pinned) return ''
+  const page = pages.value.find((item) => item.page === pinned.page)
+  const block = page?.blocks.find((item) => item.id === pinned.blockId)
+  if (block) return blockDisplay(pinned.page, block).text
+  return pinned.fallback
+})
 
 type SentencePart = {
   id: string
@@ -554,15 +623,85 @@ function figureSrc(block: ContentBlock): string | null {
   return typeof path === 'string' && path ? paperAssetUrl(props.paperId, path) : null
 }
 
-function figureStyle(block: ContentBlock) {
-  const [x0 = 0, y0 = 0, x1 = 0, y1 = 0] = block.bbox ?? []
-  const w = Math.max(1, (x1 - x0) * renderScale.value)
-  const h = Math.max(1, (y1 - y0) * renderScale.value)
+type FigureCell = { figure: ContentBlock; caption?: ContentBlock }
+type RightPaneItem =
+  | { kind: 'block'; id: string; block: ContentBlock }
+  | { kind: 'figure-group'; id: string; cells: FigureCell[] }
+
+function isSubfigureCaption(block: ContentBlock | undefined): boolean {
+  return !!block && block.type === 'caption' && /^\s*\([a-z0-9]+\)\s*$/i.test(block.source_text || '')
+}
+
+function figuresShareRow(a: ContentBlock, b: ContentBlock): boolean {
+  const [, ay0 = 0, , ay1 = 0] = a.bbox ?? []
+  const [, by0 = 0, , by1 = 0] = b.bbox ?? []
+  const overlap = Math.max(0, Math.min(ay1, by1) - Math.max(ay0, by0))
+  return overlap >= Math.min(Math.max(1, ay1 - ay0), Math.max(1, by1 - by0)) * 0.5
+}
+
+function rightPaneItems(pageNo: number): RightPaneItem[] {
+  const blocks = pageBlocks(pageNo)
+  const items: RightPaneItem[] = []
+  for (let i = 0; i < blocks.length; ) {
+    const block = blocks[i]!
+    if (block.type !== 'figure' || !figureSrc(block)) {
+      items.push({ kind: 'block', id: block.id, block })
+      i += 1
+      continue
+    }
+
+    const cells: FigureCell[] = []
+    const firstFigure = block
+    while (i < blocks.length) {
+      const figure = blocks[i]
+      if (!figure || figure.type !== 'figure' || !figureSrc(figure)) break
+      if (cells.length && !figuresShareRow(firstFigure, figure)) break
+      const caption = isSubfigureCaption(blocks[i + 1]) ? blocks[i + 1] : undefined
+      cells.push({ figure, caption })
+      i += caption ? 2 : 1
+    }
+    items.push({ kind: 'figure-group', id: `figures:${cells.map((cell) => cell.figure.id).join(':')}`, cells })
+  }
+  return items
+}
+
+function figureGroupBounds(cells: FigureCell[]) {
+  const blocks = cells.flatMap((cell) => (cell.caption ? [cell.figure, cell.caption] : [cell.figure]))
+  const xs0 = blocks.map((block) => block.bbox?.[0] ?? 0)
+  const ys0 = blocks.map((block) => block.bbox?.[1] ?? 0)
+  const xs1 = blocks.map((block) => block.bbox?.[2] ?? 1)
+  const ys1 = blocks.map((block) => block.bbox?.[3] ?? 1)
+  const x0 = Math.min(...xs0)
+  const y0 = Math.min(...ys0)
+  const x1 = Math.max(...xs1)
+  const y1 = Math.max(...ys1)
+  return { x0, y0, x1, y1, width: Math.max(1, x1 - x0), height: Math.max(1, y1 - y0) }
+}
+
+function figureGroupStyle(cells: FigureCell[], pageWidth: number) {
+  const bounds = figureGroupBounds(cells)
+  const widthPct = pageWidth > 0 ? (bounds.width / pageWidth) * 100 : 100
   return {
-    width: `${w}px`,
+    width: `${Math.min(100, Math.max(28, widthPct))}%`,
     maxWidth: '100%',
-    aspectRatio: `${w} / ${h}`,
-    height: 'auto',
+    aspectRatio: `${bounds.width} / ${bounds.height}`,
+  }
+}
+
+function figureGroupItemStyle(block: ContentBlock, cells: FigureCell[]) {
+  const bounds = figureGroupBounds(cells)
+  const [x0 = 0, y0 = 0, x1 = 1, y1 = 1] = block.bbox ?? []
+  return {
+    left: `${((x0 - bounds.x0) / bounds.width) * 100}%`,
+    top: `${((y0 - bounds.y0) / bounds.height) * 100}%`,
+    width: `${((x1 - x0) / bounds.width) * 100}%`,
+    height: `${((y1 - y0) / bounds.height) * 100}%`,
+  }
+}
+
+function figureImageStyle(block: ContentBlock, cells: FigureCell[]) {
+  return {
+    ...figureGroupItemStyle(block, cells),
     objectFit: 'contain' as const,
   }
 }
@@ -590,6 +729,7 @@ watch(
   () => props.paperId,
   () => {
     stopTranslate()
+    clearPinnedSentence()
     translationPages.value = {}
     void bootstrap()
   },
@@ -602,6 +742,10 @@ watch(
     updateFitScale()
   },
 )
+
+watch(scrollRef, (el, prev) => {
+  bindOuterWheel(el, prev)
+})
 
 onMounted(async () => {
   await bootstrap()
@@ -626,6 +770,7 @@ onBeforeUnmount(() => {
   stopPolling()
   stopTranslate()
   stopPan()
+  bindOuterWheel(null, scrollRef.value)
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
   resizeObserver?.disconnect()
   resizeObserver = null
@@ -707,6 +852,31 @@ defineExpose({ scrollToPage })
       class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
       @scroll="onScroll"
     >
+      <div
+        v-if="pinnedSentence"
+        class="pointer-events-none sticky top-2 z-40 ml-auto h-0 px-3"
+        :style="{ width: `${100 - leftPct}%` }"
+      >
+        <div
+          class="pointer-events-auto ml-1 rounded-lg border border-amber-300/80 bg-amber-50/95 px-3 py-2 shadow-lg backdrop-blur"
+        >
+          <div class="mb-1 flex items-center gap-2 text-[11px] text-amber-800/80">
+            <span>已固定对照 · 原文第 {{ pinnedSentence.page }} 页</span>
+            <span class="ml-auto">点击其他句子更新 · Esc 取消</span>
+            <button
+              type="button"
+              class="rounded px-1 text-base leading-none text-amber-900/70 hover:bg-amber-200/70"
+              title="取消固定对照"
+              @click="clearPinnedSentence"
+            >
+              ×
+            </button>
+          </div>
+          <p class="m-0 leading-relaxed text-foreground" :style="{ fontSize: `${fontPx}px` }">
+            {{ pinnedSentenceText }}
+          </p>
+        </div>
+      </div>
       <div class="w-full py-3">
         <div
           v-for="page in pages"
@@ -755,21 +925,44 @@ defineExpose({ scrollToPage })
           <div class="h-full min-w-0 flex-1 overflow-hidden bg-[#f2ede6] px-1">
             <div class="flex h-full w-full flex-col overflow-hidden bg-white shadow-sm ring-1 ring-black/5">
               <div
-                class="h-full overflow-y-auto overscroll-contain px-4 py-3"
-                @wheel="onRightPaneWheel"
+                data-right-pane
+                class="h-full overflow-y-auto overscroll-y-contain px-4 py-3"
               >
-                <template v-if="pageBlocks(page.page).length">
-                  <template v-for="block in pageBlocks(page.page)" :key="block.id">
-                    <img
-                      v-if="block.type === 'figure' && figureSrc(block)"
-                      :src="figureSrc(block)!"
-                      :alt="`${block.type}-${block.id}`"
-                      class="mb-3 rounded-sm border border-border/40 bg-[#faf7f2]"
-                      :class="figureIsCentered(block, page.width) ? 'mx-auto block' : ''"
-                      :style="figureStyle(block)"
-                    />
+                <template v-if="rightPaneItems(page.page).length">
+                  <template v-for="item in rightPaneItems(page.page)" :key="item.id">
+                    <div
+                      v-if="item.kind === 'figure-group'"
+                      class="relative mx-auto mb-5 overflow-hidden rounded-sm bg-[#faf7f2]"
+                      :style="figureGroupStyle(item.cells, page.width)"
+                    >
+                      <template v-for="cell in item.cells" :key="cell.figure.id">
+                        <img
+                          :src="figureSrc(cell.figure)!"
+                          :alt="`figure-${cell.figure.id}`"
+                          class="absolute box-border rounded-sm border border-border/40 bg-white"
+                          :style="figureImageStyle(cell.figure, item.cells)"
+                        />
+                        <p
+                          v-if="cell.caption"
+                          class="absolute m-0 text-center italic leading-none text-muted-foreground"
+                          :style="{
+                            ...figureGroupItemStyle(cell.caption, item.cells),
+                            fontSize: `${Math.min(fontPx, 12)}px`,
+                          }"
+                        >
+                          {{ blockDisplay(page.page, cell.caption).text }}
+                          <span
+                            v-if="blockDisplay(page.page, cell.caption).pending"
+                            class="ml-1 text-[9px] text-muted-foreground/70"
+                          >
+                            翻译中
+                          </span>
+                        </p>
+                      </template>
+                    </div>
+                    <template v-else v-for="block in [item.block]" :key="block.id">
                     <p
-                      v-else-if="block.type === 'formula' && block.segments?.length"
+                      v-if="block.type === 'formula' && block.segments?.length"
                       class="mb-5 leading-[1.8] text-foreground/90"
                       :class="blockTextAlign(block, page.width)"
                       :data-sentence-id="block.sentences?.[0]?.id || `block:${block.id}`"
@@ -802,10 +995,12 @@ defineExpose({ scrollToPage })
                         >
                           <span v-if="part.gap">{{ part.gap }}</span>
                           <span
-                            class="sentence-chip rounded-sm"
+                            class="sentence-chip cursor-pointer rounded-sm"
                             :data-sentence-id="part.id"
+                            title="点击定位原文并固定翻译"
                             @pointerenter="setHoveredSentence(part.id)"
                             @pointerleave="setHoveredSentence(null)"
+                            @click="togglePinnedSentence(part.id, page.page, block)"
                           >
                             <template v-for="(chunk, ci) in part.chunks" :key="`${part.id}-c-${ci}`">
                               <KatexView
@@ -833,10 +1028,12 @@ defineExpose({ scrollToPage })
                       >
                         <span v-if="part.gap">{{ part.gap }}</span>
                         <span
-                          class="sentence-chip rounded-sm"
+                          class="sentence-chip cursor-pointer rounded-sm"
                           :data-sentence-id="part.id"
+                          title="点击定位原文并固定翻译"
                           @pointerenter="setHoveredSentence(part.id)"
                           @pointerleave="setHoveredSentence(null)"
+                          @click="togglePinnedSentence(part.id, page.page, block)"
                         >
                           <template v-for="(chunk, ci) in part.chunks" :key="`${part.id}-c-${ci}`">
                             <KatexView
@@ -857,6 +1054,7 @@ defineExpose({ scrollToPage })
                         翻译中
                       </span>
                     </p>
+                    </template>
                   </template>
                 </template>
                 <p v-else class="text-sm text-muted-foreground">本页无内容</p>
