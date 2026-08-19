@@ -17,7 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 &
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 18438 &
 BACKEND_PID=$!
 
 (
@@ -27,6 +27,6 @@ BACKEND_PID=$!
 ) &
 FRONTEND_PID=$!
 
-echo "后端: http://0.0.0.0:8000"
-echo "前端: http://0.0.0.0:5173"
+echo "后端: http://0.0.0.0:18438"
+echo "前端: http://0.0.0.0:18437"
 wait

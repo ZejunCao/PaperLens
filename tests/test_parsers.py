@@ -78,6 +78,69 @@ def test_page_overflow_lines_move_to_next():
         ],
     }
     assert _split_page_overflow_lines(col, 792.0) is None
+
+    right_to_next_left = {
+        "type": "text",
+        "lines": [
+            {"bbox": [311, 695, 558, 704], "spans": [{"content": "sentence starts", "type": "text"}]},
+            {"bbox": [54, 617, 300, 626], "spans": [{"content": "and continues", "type": "text"}]},
+        ],
+    }
+    overflow = _split_page_overflow_lines(right_to_next_left, 792.0)
+    assert overflow is not None
+    assert overflow["lines"][0]["spans"][0]["content"] == "and continues"
+
+
+def test_cross_page_sentence_belongs_to_start_page():
+    from app.parsers.mineru_map import _stitch_cross_page_sentences
+    from app.schemas.document import ContentBlock, PageLayout, Sentence
+
+    left = ContentBlock(
+        id="b_left",
+        page=1,
+        order=0,
+        bbox=[310, 690, 560, 705],
+        source_text="Sentence C starts",
+        sentences=[Sentence(id="s_c", text="Sentence C starts", order=0)],
+        meta={"continues_to": "flow_1"},
+    )
+    right = ContentBlock(
+        id="b_right",
+        page=2,
+        order=1,
+        bbox=[54, 617, 300, 650],
+        source_text="and finishes. Sentence D.",
+        sentences=[
+            Sentence(id="s_tail", text="and finishes.", order=0),
+            Sentence(id="s_d", text="Sentence D.", order=1),
+        ],
+        meta={"continues_from": "flow_1"},
+    )
+    pages = [
+        PageLayout(page=1, width=612, height=792, blocks=[left]),
+        PageLayout(page=2, width=612, height=792, blocks=[right]),
+    ]
+    _stitch_cross_page_sentences(pages)
+
+    assert left.sentences[-1].full_text == "Sentence C starts and finishes."
+    assert left.sentences[-1].owner_page == 1
+    assert right.sentences[0].id == left.sentences[-1].id
+    assert right.sentences[0].owner_page == 1
+    assert right.sentences[1].owner_page is None
+
+
+def test_text_block_bbox_covers_both_columns():
+    from app.parsers.mineru_map import _content_bbox_from_lines
+
+    block = {
+        "bbox": [50, 547, 302, 689],
+        "lines": [
+            {"bbox": [52, 642, 300, 652], "spans": []},
+            {"bbox": [310, 191, 557, 201], "spans": []},
+            {"bbox": [310, 203, 558, 213], "spans": []},
+        ],
+    }
+    assert _content_bbox_from_lines(block) == [52.0, 191.0, 558.0, 652.0]
     import json
 
     middle = json.loads(FIXTURE.read_text(encoding="utf-8"))

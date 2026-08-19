@@ -27,6 +27,8 @@ class Sentence(BaseModel):
     text: str
     order: int = 0
     bbox: list[float] | None = None  # [x0, y0, x1, y1] 页面坐标
+    full_text: str | None = None  # 跨页句子的完整文本；text 保留当前页物理片段
+    owner_page: int | None = None  # 完整句子在右栏及翻译中的归属页
 
 
 class TextSpan(BaseModel):

@@ -13,6 +13,7 @@ from app.database import Base, get_db
 from app.main import create_app
 from app.schemas.document import ContentBlock, Document, PageLayout, Sentence
 from app.services.documents import save_document
+from app.services.translate import collect_page_sentences
 
 
 @pytest.fixture()
@@ -183,3 +184,62 @@ def test_translate_page_uses_sentence_ids(client: TestClient, monkeypatch: pytes
     assert pages["1"]["sentences"]["s_aaa"] == "你好，世界。"
     cached = json.loads((papers_dir / pid / "translations" / "zh-CN.json").read_text(encoding="utf-8"))
     assert cached["pages"]["1"]["sentences"]["s_bbb"] == "第二句。"
+
+
+def test_collect_page_sentences_keeps_cross_page_sentence_on_start_page():
+    cross_page_text = "Sentence C starts on page one and finishes on page two."
+    doc = Document(
+        paper_id="cross-page",
+        parser="test",
+        page_count=2,
+        pages=[
+            PageLayout(
+                page=1,
+                width=612,
+                height=792,
+                blocks=[
+                    ContentBlock(
+                        id="b1",
+                        page=1,
+                        order=0,
+                        bbox=[300, 680, 560, 710],
+                        source_text="Sentence C starts on page one",
+                        sentences=[
+                            Sentence(
+                                id="s_c",
+                                text="Sentence C starts on page one",
+                                full_text=cross_page_text,
+                                owner_page=1,
+                            )
+                        ],
+                    )
+                ],
+            ),
+            PageLayout(
+                page=2,
+                width=612,
+                height=792,
+                blocks=[
+                    ContentBlock(
+                        id="b2",
+                        page=2,
+                        order=1,
+                        bbox=[50, 80, 300, 130],
+                        source_text="and finishes on page two. Sentence D.",
+                        sentences=[
+                            Sentence(
+                                id="s_c",
+                                text="and finishes on page two.",
+                                full_text=cross_page_text,
+                                owner_page=1,
+                            ),
+                            Sentence(id="s_d", text="Sentence D.", order=1),
+                        ],
+                    )
+                ],
+            ),
+        ],
+    )
+
+    assert collect_page_sentences(doc, 1) == [("s_c", cross_page_text)]
+    assert collect_page_sentences(doc, 2) == [("s_d", "Sentence D.")]

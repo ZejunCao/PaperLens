@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { AlertCircle, ArrowLeft, Loader2, Minus, Plus, RotateCcw } from 'lucide-vue-next'
 import SplitDocumentView from '@/components/reader/SplitDocumentView.vue'
 import ReaderRightRail from '@/components/reader/ReaderRightRail.vue'
 import { usePapersStore } from '@/stores/papers'
+import { useUiStore } from '@/stores/ui'
 import type { Paper } from '@/types'
 import { STATUS_LABEL } from '@/types'
 
@@ -13,7 +15,13 @@ const props = defineProps<{
 }>()
 
 const store = usePapersStore()
+const uiStore = useUiStore()
 const router = useRouter()
+const {
+  readerPdfScale: pdfScale,
+  readerTextScale: textScale,
+  readerSplitPercent: splitPercent,
+} = storeToRefs(uiStore)
 
 const loadingMeta = ref(true)
 const error = ref('')
@@ -21,9 +29,6 @@ const error = ref('')
 const page = ref(1)
 const pageCount = ref(0)
 const pageInput = ref('1')
-const pdfScale = ref(1)
-const textScale = ref(1)
-const splitPercent = ref(50)
 const paperStatus = ref<Paper['status'] | null>(null)
 
 const docRef = ref<InstanceType<typeof SplitDocumentView> | null>(null)

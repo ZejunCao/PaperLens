@@ -14,7 +14,7 @@ if ($parser -eq "pymupdf") {
 uv run alembic upgrade head
 
 $backend = Start-Process -PassThru -NoNewWindow -FilePath "uv" -ArgumentList @(
-  "run", "uvicorn", "app.main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"
+  "run", "uvicorn", "app.main:app", "--reload", "--host", "0.0.0.0", "--port", "18438"
 )
 
 Push-Location frontend
@@ -22,8 +22,8 @@ if (-not (Test-Path "node_modules")) { npm install }
 $frontend = Start-Process -PassThru -NoNewWindow -FilePath "npm" -ArgumentList @("run", "dev")
 Pop-Location
 
-Write-Host "后端: http://0.0.0.0:8000"
-Write-Host "前端: http://0.0.0.0:5173"
+Write-Host "后端: http://0.0.0.0:18438"
+Write-Host "前端: http://0.0.0.0:18437"
 Write-Host "按 Ctrl+C 结束..."
 
 try {

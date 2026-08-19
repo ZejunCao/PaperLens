@@ -17,6 +17,10 @@ export interface Sentence {
   text: string
   order: number
   bbox?: number[] | null
+  /** 跨页句子的完整文本；text 仍是当前页用于版式匹配的片段。 */
+  full_text?: string | null
+  /** 完整句子在右栏及翻译中的归属页。 */
+  owner_page?: number | null
 }
 
 export interface TextSpan {

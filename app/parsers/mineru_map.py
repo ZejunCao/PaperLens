@@ -198,7 +198,10 @@ def _split_page_overflow_lines(
         prev_y, prev_x0 = prev_box[1], prev_box[0]
         jumped_up = prev_y > page_height * 0.62 and y < page_height * 0.28
         to_right_column = x0 > prev_x0 + 80
-        if not spilled and jumped_up and not to_right_column:
+        # 同一页双栏正文按左栏 -> 右栏流动；右栏 -> 左栏通常意味着翻到下一页。
+        # 下一页开头可能被大图占据，正文从页面下半部继续，不能只依赖 y 跳回页顶。
+        wrapped_to_left = x0 < prev_x0 - 80
+        if not spilled and (wrapped_to_left or (jumped_up and not to_right_column)):
             spilled = True
         if spilled:
             overflow.append(line)
@@ -226,6 +229,69 @@ def _split_page_overflow_lines(
             max(b[3] for b in over_boxes),
         ],
     }
+
+
+def _content_bbox_from_lines(block: dict[str, Any]) -> list[float] | None:
+    """以实际行/片段坐标重算文本块边界，覆盖 MinerU 只框住首栏的情况。"""
+    boxes: list[list[float]] = []
+    for line in block.get("lines") or []:
+        line_box = _as_bbox(line.get("bbox"))
+        if line_box[2] > line_box[0] and line_box[3] > line_box[1]:
+            boxes.append(line_box)
+            continue
+        for span in line.get("spans") or []:
+            span_box = _as_bbox(span.get("bbox"))
+            if span_box[2] > span_box[0] and span_box[3] > span_box[1]:
+                boxes.append(span_box)
+    if not boxes:
+        return None
+    return [
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    ]
+
+
+_SENTENCE_END = re.compile(r"[.!?。！？][\"'”’）)]*$")
+
+
+def _stitch_cross_page_sentences(pages: list[PageLayout]) -> None:
+    """连接跨页句子的物理片段，并把完整句子归到起始页。"""
+    blocks = [block for page in pages for block in page.blocks]
+    starts = {
+        str(block.meta.get("continues_to")): block
+        for block in blocks
+        if block.meta.get("continues_to")
+    }
+    ends = {
+        str(block.meta.get("continues_from")): block
+        for block in blocks
+        if block.meta.get("continues_from")
+    }
+    for continuation_id, left in starts.items():
+        right = ends.get(continuation_id)
+        if right is None or not left.sentences or not right.sentences:
+            continue
+        left_sent = left.sentences[-1]
+        right_sent = right.sentences[0]
+        left_text = (left_sent.full_text or left_sent.text or "").strip()
+        right_text = (right_sent.full_text or right_sent.text or "").strip()
+        if not left_text or not right_text or _SENTENCE_END.search(left_text):
+            continue
+
+        full_text = _join_plain(left_text, right_text)
+        owner_page = left_sent.owner_page or left.page
+        sentence_id = left_sent.id
+        linked_ids = {left_sent.id, right_sent.id}
+        # 多页连续时，更新此前已经共享该句 ID 的所有物理片段。
+        for block in blocks:
+            for sent in block.sentences:
+                if sent.id not in linked_ids:
+                    continue
+                sent.id = sentence_id
+                sent.full_text = full_text
+                sent.owner_page = owner_page
 
 
 def _flush_text_seg(
@@ -450,12 +516,19 @@ def document_from_middle(
         for logical, raw in _iter_para_blocks(para):
             overflow = _split_page_overflow_lines(raw, height)
             if overflow:
+                continuation_id = new_id("flow")
+                raw["_paperlens_continues_to"] = continuation_id
+                overflow["_paperlens_continues_from"] = continuation_id
                 carry.append(overflow)
-            bbox = _as_bbox(raw.get("bbox"))
+            bbox = _content_bbox_from_lines(raw) or _as_bbox(raw.get("bbox"))
             spans, segments, source = _lines_to_spans_segments(raw, image_map)
             img_raw = _collect_span_image(raw)
             img_path = resolve_image_path(img_raw, image_map)
             meta: dict[str, Any] = {}
+            if raw.get("_paperlens_continues_from"):
+                meta["continues_from"] = str(raw["_paperlens_continues_from"])
+            if raw.get("_paperlens_continues_to"):
+                meta["continues_to"] = str(raw["_paperlens_continues_to"])
             if img_path:
                 meta["image_path"] = img_path
                 meta["kind"] = "formula" if logical in {"formula", "interline_equation", "equation"} else (
@@ -521,6 +594,7 @@ def document_from_middle(
                 title = b.source_text[:512]
                 break
 
+    _stitch_cross_page_sentences(pages)
     return Document(
         paper_id=paper_id,
         parser=parser,

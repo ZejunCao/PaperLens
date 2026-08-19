@@ -64,12 +64,15 @@ def collect_page_sentences(document: Document, page_no: int) -> list[tuple[str, 
         if block.type in _SKIP_TYPES:
             continue
         for sent in block.sentences or []:
+            if sent.owner_page is not None and sent.owner_page != page_no:
+                continue
             if sent.id in seen:
                 continue
-            if _should_skip_text(sent.text):
+            text = sent.full_text or sent.text
+            if _should_skip_text(text):
                 continue
             seen.add(sent.id)
-            out.append((sent.id, sent.text))
+            out.append((sent.id, text))
     return out
 
 

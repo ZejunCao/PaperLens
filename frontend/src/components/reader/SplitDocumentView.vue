@@ -363,16 +363,26 @@ async function runTranslate(page: number) {
   }
 }
 
+function sentenceText(sent: Sentence): string {
+  return sent.full_text?.trim() || sent.text
+}
+
+function pageSentences(pageNo: number, block: ContentBlock): Sentence[] {
+  return [...(block.sentences || [])]
+    .filter((sent) => sent.owner_page == null || sent.owner_page === pageNo)
+    .sort((a, b) => a.order - b.order)
+}
+
 function sentenceView(pageNo: number, sent: Sentence): { text: string; pending: boolean } {
   const zh = translationPages.value[String(pageNo)]?.sentences?.[sent.id]
   if (zh) return { text: zh, pending: false }
   const pending =
     translatingPage.value === pageNo || translationPages.value[String(pageNo)]?.status === 'pending'
-  return { text: sent.text, pending }
+  return { text: sentenceText(sent), pending }
 }
 
 function blockSentenceParts(pageNo: number, block: ContentBlock) {
-  const parts = (block.sentences || []).map((sent) => sentenceView(pageNo, sent))
+  const parts = pageSentences(pageNo, block).map((sent) => sentenceView(pageNo, sent))
   return {
     parts,
     pending: parts.some((p) => p.pending),
@@ -393,7 +403,8 @@ function blockDisplay(pageNo: number, block: ContentBlock): { text: string; pend
 function blockRichChunks(pageNo: number, block: ContentBlock): RichChunk[] {
   const segs = block.segments || []
   const hasMathSeg = segs.some((s) => s.kind === 'math' && (s.latex || '').trim())
-  const hasZh = (block.sentences || []).some(
+  const visibleSentences = pageSentences(pageNo, block)
+  const hasZh = visibleSentences.some(
     (s) => !!translationPages.value[String(pageNo)]?.sentences?.[s.id],
   )
   if (!hasZh && hasMathSeg) {
@@ -408,7 +419,7 @@ function blockRichChunks(pageNo: number, block: ContentBlock): RichChunk[] {
       .filter((c): c is RichChunk => !!c)
   }
   const raw =
-    (block.sentences || []).length > 0
+    visibleSentences.length > 0
       ? blockDisplay(pageNo, block).text
       : block.source_text || segs.map((s) => s.text || s.latex || '').join('')
   return splitInlineMath(raw)
@@ -491,8 +502,10 @@ type SentencePart = {
 }
 
 function sentenceRenderParts(pageNo: number, block: ContentBlock): SentencePart[] {
-  const sents = [...(block.sentences || [])].sort((a, b) => a.order - b.order)
+  const sents = pageSentences(pageNo, block)
   if (!sents.length) {
+    // 该块只有跨页句子的后续物理片段，右栏应在句子起始页显示完整内容。
+    if ((block.sentences || []).length) return []
     const chunks = blockRichChunks(pageNo, block)
     if (!chunks.length) return []
     return [{ id: `block:${block.id}`, gap: '', chunks, pending: false }]
@@ -531,7 +544,9 @@ function blockTypeClass(block: ContentBlock) {
 function pageBlocks(pageNo: number): ContentBlock[] {
   const p = pages.value.find((x) => x.page === pageNo)
   if (!p) return []
-  return [...p.blocks].sort((a, b) => a.order - b.order || a.bbox[1] - b.bbox[1])
+  return [...p.blocks]
+    .filter((block) => !(block.sentences || []).length || pageSentences(pageNo, block).length > 0)
+    .sort((a, b) => a.order - b.order || a.bbox[1] - b.bbox[1])
 }
 
 function figureSrc(block: ContentBlock): string | null {

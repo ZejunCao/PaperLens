@@ -54,7 +54,7 @@ export function paperFileUrl(id: string): string {
 }
 
 export async function fetchDocument(id: string): Promise<import('@/types/document').DocumentModel> {
-  const res = await fetch(`/api/papers/${id}/document`)
+  const res = await fetch(`/api/papers/${id}/document`, { cache: 'no-store' })
   if (!res.ok) throw new Error(await parseError(res))
   return res.json()
 }
