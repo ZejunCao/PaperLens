@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 
 from app.schemas.document import ContentBlock, Document
 from app.schemas.llm import PageTranslation, TranslationFile, TranslationOut
+from app.services.citations import CitationProfile, detect_citation_profile, strip_citations
 from app.services.documents import load_document, paper_dir
 from app.services.llm_settings import is_llm_configured, load_llm_config_raw
 
@@ -54,12 +55,17 @@ def _should_skip_text(text: str) -> bool:
     return False
 
 
-def collect_page_sentences(document: Document, page_no: int) -> list[tuple[str, str]]:
+def collect_page_sentences(
+    document: Document,
+    page_no: int,
+    citation_profile: CitationProfile | None = None,
+) -> list[tuple[str, str]]:
     page = next((p for p in document.pages if p.page == page_no), None)
     if page is None:
         return []
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
+    citation_profile = citation_profile or detect_citation_profile(document)
     for block in page.blocks:
         if block.type in _SKIP_TYPES:
             continue
@@ -68,7 +74,7 @@ def collect_page_sentences(document: Document, page_no: int) -> list[tuple[str, 
                 continue
             if sent.id in seen:
                 continue
-            text = sent.full_text or sent.text
+            text = strip_citations(sent.full_text or sent.text, citation_profile)
             if _should_skip_text(text):
                 continue
             seen.add(sent.id)
@@ -194,7 +200,8 @@ def translate_page(paper_id: str, page_no: int, lang: str = "zh-CN") -> Translat
     if not is_llm_configured(cfg):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "尚未配置模型（设置页填写 Base URL 与 Model）")
 
-    items = collect_page_sentences(document, page_no)
+    citation_profile = detect_citation_profile(document)
+    items = collect_page_sentences(document, page_no, citation_profile)
     if not items:
         file.pages[key] = PageTranslation(status="ready", error=None, sentences={})
         file.provider = "openai_compatible"
