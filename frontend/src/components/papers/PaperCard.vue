@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { FileText, Pencil, Trash2, ExternalLink, RefreshCw, Loader2 } from 'lucide-vue-next'
 import type { Paper } from '@/types'
-import { STATUS_LABEL } from '@/types'
+import { STATUS_LABEL, parseStageLabel } from '@/types'
 import { cn, formatBytes, formatDateTime } from '@/lib/utils'
 
 const props = defineProps<{
@@ -22,6 +22,19 @@ const draft = ref('')
 const busy = ref(false)
 
 const displayTitle = computed(() => props.paper.title || props.paper.filename)
+const showProgress = computed(() => ['queued', 'parsing'].includes(props.paper.status))
+const progressPct = computed(() => {
+  const p = props.paper.parse_progress
+  if (typeof p === 'number' && p >= 0) return Math.min(100, Math.max(0, p))
+  if (props.paper.status === 'queued') return 2
+  if (props.paper.status === 'parsing') return 12
+  return 0
+})
+const progressHint = computed(() => {
+  const stage = parseStageLabel(props.paper.parse_stage)
+  if (stage) return `${stage} · ${progressPct.value}%`
+  return props.paper.status === 'queued' ? '排队等待…' : '解析中…'
+})
 
 function open() {
   router.push({ name: 'reader', params: { id: props.paper.id } })
@@ -110,6 +123,19 @@ function confirmReparse() {
       <span v-if="paper.page_count">{{ paper.page_count }} 页</span>
       <span>{{ formatBytes(paper.file_size) }}</span>
       <span>{{ formatDateTime(paper.created_at) }}</span>
+    </div>
+
+    <div v-if="showProgress" class="mb-3 space-y-1.5">
+      <div class="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <span class="truncate">{{ progressHint }}</span>
+        <span class="shrink-0 tabular-nums">{{ progressPct }}%</span>
+      </div>
+      <div class="h-1.5 overflow-hidden rounded-full bg-border/70">
+        <div
+          class="h-full rounded-full bg-primary transition-[width] duration-500 ease-out"
+          :style="{ width: `${progressPct}%` }"
+        />
+      </div>
     </div>
 
     <p v-if="paper.error_message" class="mb-3 text-xs text-destructive">

@@ -74,6 +74,21 @@ export const usePapersStore = defineStore('papers', () => {
     }
   }
 
+  async function importFromUrl(url: string) {
+    uploading.value = true
+    error.value = ''
+    try {
+      const paper = await api.importPaperFromUrl(url)
+      items.value = [paper, ...items.value.filter((p) => p.id !== paper.id)]
+      return paper
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : String(e)
+      throw e
+    } finally {
+      uploading.value = false
+    }
+  }
+
   async function rename(id: string, title: string) {
     const paper = await api.renamePaper(id, title)
     const idx = items.value.findIndex((p) => p.id === id)
@@ -104,7 +119,19 @@ export const usePapersStore = defineStore('papers', () => {
     return paper
   }
 
-  return { items, loading, uploading, error, load, upload, rename, remove, reparse, getOne }
+  return {
+    items,
+    loading,
+    uploading,
+    error,
+    load,
+    upload,
+    importFromUrl,
+    rename,
+    remove,
+    reparse,
+    getOne,
+  }
 })
 
 if (import.meta.hot) {

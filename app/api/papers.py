@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas.job import JobOut
-from app.schemas.paper import PaperListResponse, PaperOut, PaperRename
+from app.schemas.paper import PaperFromUrl, PaperListResponse, PaperOut, PaperRename
 from app.services import jobs as jobs_service
 from app.services import papers as papers_service
 from app.services.documents import document_path, paper_dir
@@ -26,6 +26,13 @@ async def upload_paper(
     db: Session = Depends(get_db),
 ) -> PaperOut:
     paper = await papers_service.create_paper_from_upload(db, file)
+    return PaperOut.model_validate(paper)
+
+
+@router.post("/from-url", response_model=PaperOut, status_code=201)
+def import_paper_from_url(body: PaperFromUrl, db: Session = Depends(get_db)) -> PaperOut:
+    """下载 arXiv PDF 到本地 uploads，再入队解析。"""
+    paper = papers_service.create_paper_from_arxiv(db, body.url)
     return PaperOut.model_validate(paper)
 
 

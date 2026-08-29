@@ -16,7 +16,7 @@ from app.models.paper import Paper, PaperStatus
 from app.parsers import parse_pdf
 from app.parsers.base import ParserError
 from app.services.documents import paper_dir, save_document
-from app.services.jobs import claim_next_parse_job
+from app.services.jobs import claim_next_parse_job, set_parse_progress
 from app.services.papers import paper_file_path
 
 logger = logging.getLogger("paperlens.worker")
@@ -31,6 +31,8 @@ def execute_parse_job(db: Session, job: Job) -> None:
     if paper is None:
         job.status = JobStatus.failed.value
         job.error_message = "论文记录不存在"
+        job.stage = "failed"
+        job.progress = 0
         job.finished_at = datetime.now(timezone.utc)
         db.commit()
         return
@@ -40,21 +42,32 @@ def execute_parse_job(db: Session, job: Job) -> None:
     try:
         if not pdf_path.exists():
             raise ParserError("PDF 文件缺失")
-        document = parse_pdf(pdf_path, paper.id, out_dir)
+
+        def on_progress(stage: str, progress: int) -> None:
+            set_parse_progress(db, job, stage=stage, progress=progress, paper=paper)
+
+        document = parse_pdf(pdf_path, paper.id, out_dir, on_progress=on_progress)
+        set_parse_progress(db, job, stage="saving", progress=92, paper=paper)
         save_document(document)
         paper.page_count = document.page_count
         if document.title and (not paper.title or paper.title == Path(paper.filename).stem):
             paper.title = document.title[:512]
         paper.status = PaperStatus.ready.value
         paper.error_message = None
+        paper.parse_stage = "done"
+        paper.parse_progress = 100
         job.status = JobStatus.succeeded.value
         job.error_message = None
+        job.stage = "done"
+        job.progress = 100
     except Exception as e:  # noqa: BLE001
         logger.exception("parse failed paper=%s", paper.id)
         paper.status = PaperStatus.failed.value
         paper.error_message = str(e)[:2000]
+        paper.parse_stage = "failed"
         job.status = JobStatus.failed.value
         job.error_message = str(e)[:2000]
+        job.stage = "failed"
     job.finished_at = datetime.now(timezone.utc)
     db.commit()
 

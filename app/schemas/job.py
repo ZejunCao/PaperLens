@@ -13,6 +13,8 @@ class JobOut(BaseModel):
     type: JobType
     status: JobStatus
     error_message: str | None = None
+    stage: str | None = None
+    progress: int | None = None
     attempt: int
     created_at: datetime
     updated_at: datetime

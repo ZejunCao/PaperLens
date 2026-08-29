@@ -30,6 +30,9 @@ _CAPTION_TYPES = {
 }
 _BODY_TYPES = {"image_body", "table_body", "chart_body"}
 _HTML_TAG = re.compile(r"<[^>]+>")
+# MinerU 偶发把上标数字识别成 \widehat{2}
+_LATEX_WIDEHAT_DIGIT = re.compile(r"\\widehat\s*\{\s*(\d+)\s*\}")
+_LATEX_SPACEY = re.compile(r"\s+")
 _COMPOUND_PREFIXES = {
     "self",
     "well",
@@ -124,6 +127,17 @@ def _join_text(parts: list[str]) -> str:
     return out
 
 
+def _normalize_latex(tex: str) -> str:
+    """清理 MinerU 公式里常见的识别噪声。"""
+    s = (tex or "").strip()
+    if not s:
+        return s
+    s = _LATEX_WIDEHAT_DIGIT.sub(r"\1", s)
+    # 多余空格不影响渲染，但会放大 \left/\right 视觉体量；适度压缩
+    s = _LATEX_SPACEY.sub(" ", s)
+    return s
+
+
 def _sentences_from(text: str, bbox: list[float]) -> list[Sentence]:
     out: list[Sentence] = []
     for i, sent in enumerate(split_sentences(text)):
@@ -188,6 +202,9 @@ def _split_page_overflow_lines(
     lines = list(block.get("lines") or [])
     if len(lines) < 2 or page_height <= 0:
         return None
+    mtype = str(block.get("type") or "").lower()
+    # 标题/小节多行常居中：下一行更宽、x0 更靠左，绝不能当成「右栏→左栏翻页」
+    title_like = mtype in {"title", "doc_title", "section"}
     keep: list[dict[str, Any]] = [lines[0]]
     overflow: list[dict[str, Any]] = []
     spilled = False
@@ -199,8 +216,12 @@ def _split_page_overflow_lines(
         jumped_up = prev_y > page_height * 0.62 and y < page_height * 0.28
         to_right_column = x0 > prev_x0 + 80
         # 同一页双栏正文按左栏 -> 右栏流动；右栏 -> 左栏通常意味着翻到下一页。
-        # 下一页开头可能被大图占据，正文从页面下半部继续，不能只依赖 y 跳回页顶。
-        wrapped_to_left = x0 < prev_x0 - 80
+        # 仅当上一行已在页面下半部时才启用，避免论文标题第二行误拆。
+        wrapped_to_left = (
+            not title_like
+            and prev_y > page_height * 0.40
+            and x0 < prev_x0 - 80
+        )
         if not spilled and (wrapped_to_left or (jumped_up and not to_right_column)):
             spilled = True
         if spilled:
@@ -337,7 +358,7 @@ def _lines_to_spans_segments(
             if stype in {"image", "table", "chart"}:
                 continue
             if stype in {"inline_equation", "interline_equation", "equation"}:
-                latex = content.strip()
+                latex = _normalize_latex(content)
                 if not latex:
                     continue
                 _flush_text_seg(segments, text_buf, buf_bbox, buf_size, buf_origin)

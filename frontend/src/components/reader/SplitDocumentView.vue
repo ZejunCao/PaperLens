@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AlertCircle, Loader2, RefreshCw } from 'lucide-vue-next'
+import WheelGestures, { type WheelEventState } from 'wheel-gestures'
 import LayoutPage from '@/components/reader/LayoutPage.vue'
 import KatexView from '@/components/reader/KatexView.vue'
 import { fetchDocument, fetchPaper, paperAssetUrl, retryParse } from '@/api/papers'
@@ -8,7 +9,7 @@ import { fetchTranslations, translatePaperPage } from '@/api/settings'
 import type { ContentBlock, DocumentModel, Sentence } from '@/types/document'
 import type { PageTranslation } from '@/types/translation'
 import type { Paper } from '@/types'
-import { STATUS_LABEL } from '@/types'
+import { STATUS_LABEL, parseStageLabel } from '@/types'
 import { splitInlineMath, type RichChunk } from '@/lib/inlineMath'
 import { decodeSentRanges, textNodeOfEl } from '@/lib/sentenceLayout'
 
@@ -62,6 +63,23 @@ let panStartX = 0
 let panStartY = 0
 let panScrollLeft = 0
 let panScrollTop = 0
+let wheelAbort: AbortController | null = null
+/** 各页右栏页内位移（不用 overflow:auto，避免浏览器把滚轮锁死在已到底的容器上）。 */
+const rightOffsets = ref<Record<number, number>>({})
+type WheelOwner = 'inner' | 'outer'
+let activeSlide: {
+  owner: WheelOwner
+  direction: -1 | 1
+} | null = null
+/** https://github.com/xiel/wheel-gestures — 区分用户新滑 vs 惯性衰减 */
+let wheelGestures: ReturnType<typeof WheelGestures> | null = null
+let pendingWheelPane: HTMLElement | null = null
+/** 页内撞底后，事件流停住多久才解锁，允许下一次滑动重判（只用于解锁，不用于把惯性接到全文） */
+const BOUNDARY_IDLE_MS = 120
+let boundaryIdleTimer: ReturnType<typeof setTimeout> | null = null
+/** 控制台执行 localStorage.setItem('paperlens:wheel-debug', '1') 后刷新，可看意图分类 */
+const WHEEL_DEBUG =
+  typeof localStorage !== 'undefined' && localStorage.getItem('paperlens:wheel-debug') === '1'
 
 const leftPct = computed(() => Math.min(80, Math.max(20, props.splitPercent)))
 const fontPx = computed(() => Math.round(14 * props.fontScale))
@@ -74,6 +92,20 @@ const isParsing = computed(
 const needsParse = computed(
   () => !!paper.value && (paper.value.status === 'uploaded' || paper.value.status === 'failed'),
 )
+const parseProgressPct = computed(() => {
+  const p = paper.value?.parse_progress
+  if (typeof p === 'number' && p >= 0) return Math.min(100, Math.max(0, p))
+  if (paper.value?.status === 'queued') return 2
+  if (paper.value?.status === 'parsing') return 12
+  return 0
+})
+const parseProgressHint = computed(() => {
+  const stage = parseStageLabel(paper.value?.parse_stage)
+  if (stage) return stage
+  if (paper.value?.status === 'queued') return '排队等待'
+  if (isParsing.value) return '正在结构化解析'
+  return ''
+})
 
 function updateFitScale() {
   const el = scrollRef.value
@@ -271,7 +303,7 @@ function onLeftPaneScroll(e: Event) {
   syncLeftScroll(e.currentTarget as HTMLElement)
 }
 
-function wheelDeltaY(e: WheelEvent): number {
+function wheelDeltaY(e: Pick<WheelEvent, 'deltaY' | 'deltaMode'>): number {
   if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) return e.deltaY * 16
   if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
     return e.deltaY * (scrollRef.value?.clientHeight ?? 400)
@@ -279,34 +311,186 @@ function wheelDeltaY(e: WheelEvent): number {
   return e.deltaY
 }
 
-function bindOuterWheel(el: HTMLDivElement | null, prev?: HTMLDivElement | null) {
-  prev?.removeEventListener('wheel', onRightPaneWheel, true)
-  el?.addEventListener('wheel', onRightPaneWheel, { capture: true, passive: false })
+function createWheelGestures() {
+  // preventWheelAction:false → 我们自己 preventDefault
+  // reverseSign:false → 保留浏览器原始 delta 符号，避免和 scrollTop 方向拧反
+  const wg = WheelGestures({
+    preventWheelAction: false,
+    reverseSign: false,
+  })
+  wg.on('wheel', onWheelGesture)
+  return wg
+}
+
+function bindOuterWheel(el: HTMLDivElement | null, _prev?: HTMLDivElement | null) {
+  wheelAbort?.abort()
+  wheelAbort = null
+  clearBoundaryIdleUnlock()
+  wheelGestures?.disconnect()
+  wheelGestures = null
+  activeSlide = null
+  pendingWheelPane = null
+  if (!el) return
+  wheelGestures = createWheelGestures()
+  wheelAbort = new AbortController()
+  window.addEventListener('wheel', onRightPaneWheel, {
+    capture: true,
+    passive: false,
+    signal: wheelAbort.signal,
+  })
+}
+
+function rightPanePageNo(pane: HTMLElement): number {
+  return Number(pane.closest('[data-page]')?.getAttribute('data-page') || 0)
+}
+
+function rightContentMax(pane: HTMLElement): number {
+  const content = pane.querySelector<HTMLElement>('[data-right-content]')
+  if (!content) return 0
+  return Math.max(0, content.offsetHeight - pane.clientHeight)
+}
+
+function rightOffsetOf(pageNo: number): number {
+  return rightOffsets.value[pageNo] ?? 0
+}
+
+function setRightOffset(pageNo: number, next: number) {
+  if (rightOffsetOf(pageNo) === next) return
+  rightOffsets.value = { ...rightOffsets.value, [pageNo]: next }
+}
+
+function canInnerScroll(pane: HTMLElement, dy: number): boolean {
+  const max = rightContentMax(pane)
+  if (max <= 1) return false
+  const top = rightOffsetOf(rightPanePageNo(pane))
+  if (dy > 0) return top < max - 1
+  return top > 1
+}
+
+function applyInnerScroll(pane: HTMLElement, dy: number): boolean {
+  const pageNo = rightPanePageNo(pane)
+  const max = rightContentMax(pane)
+  const top = rightOffsetOf(pageNo)
+  const next = Math.min(max, Math.max(0, top + dy))
+  if (next === top) return false
+  setRightOffset(pageNo, next)
+  return true
+}
+
+function resolveRightPane(e: WheelEvent, outer: HTMLElement): HTMLElement | null {
+  const fromTarget = (e.target as HTMLElement | null)?.closest?.('[data-right-pane]') as HTMLElement | null
+  if (fromTarget && outer.contains(fromTarget)) return fromTarget
+  const hovered = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null
+  const fromPoint = hovered?.closest?.('[data-right-pane]') as HTMLElement | null
+  if (fromPoint && outer.contains(fromPoint)) return fromPoint
+  for (const el of outer.querySelectorAll<HTMLElement>('[data-right-pane]')) {
+    const r = el.getBoundingClientRect()
+    if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+      return el
+    }
+  }
+  return null
+}
+
+function rightThumbStyle(pageNo: number, paneHeight: number) {
+  const pane = scrollRef.value?.querySelector(`[data-page="${pageNo}"] [data-right-pane]`) as HTMLElement | null
+  const max = pane ? rightContentMax(pane) : 0
+  if (max <= 1 || paneHeight <= 0) return { display: 'none' }
+  const view = pane?.clientHeight || paneHeight
+  const thumb = Math.max(24, (view / (view + max)) * paneHeight)
+  const top = (rightOffsetOf(pageNo) / max) * (paneHeight - thumb)
+  return {
+    height: `${thumb}px`,
+    transform: `translateY(${top}px)`,
+  }
 }
 
 /**
- * 右栏只做一件事：内容溢出则只滚当页，到边吞掉，绝不翻篇。
- * 内容装得下时右栏本身不是滚动面，滚轮交给整篇。
- * 不要用超时猜手势结束——触控板惯性间隙会把「页内滑」误判成「翻页」。
+ * 右栏页内滚 + 全文翻页：
+ * - 新手势开始时看能不能页内滚，整次手势锁死 owner
+ * - owner=inner 且已到底：只吞事件，惯性绝不能连到全文
+ * - 到底后再无 wheel 一小段：解锁，下一次滑重新判定（可全文）
+ * 惯性/新手势识别用 wheel-gestures（isStart / isEnding）。
  */
 function onRightPaneWheel(e: WheelEvent) {
   const outer = scrollRef.value
-  const pane = (e.target as HTMLElement | null)?.closest?.('[data-right-pane]') as HTMLElement | null
-  if (!outer || !pane || !outer.contains(pane) || e.deltaY === 0) return
-
-  const overflowing = pane.scrollHeight > pane.clientHeight + 1
-  if (overflowing) {
-    const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 1
-    const atTop = pane.scrollTop <= 1
-    const innerCanScroll = e.deltaY > 0 ? !atBottom : !atTop
-    if (!innerCanScroll) e.preventDefault()
-    e.stopPropagation()
-    return
-  }
+  const pane = outer ? resolveRightPane(e, outer) : null
+  if (!outer || !pane || e.deltaY === 0) return
 
   e.preventDefault()
   e.stopPropagation()
-  outer.scrollTop += wheelDeltaY(e)
+  pendingWheelPane = pane
+  wheelGestures?.feedWheel(e)
+}
+
+function clearBoundaryIdleUnlock() {
+  if (boundaryIdleTimer != null) {
+    clearTimeout(boundaryIdleTimer)
+    boundaryIdleTimer = null
+  }
+}
+
+/** 页内撞底并吞掉惯性后，等事件流真正停住再解锁，避免慢拖尾包被当成「还能继续同一串」。 */
+function armBoundaryIdleUnlock() {
+  clearBoundaryIdleUnlock()
+  boundaryIdleTimer = setTimeout(() => {
+    boundaryIdleTimer = null
+    activeSlide = null
+    wheelGestures?.disconnect()
+    wheelGestures = createWheelGestures()
+  }, BOUNDARY_IDLE_MS)
+}
+
+function onWheelGesture(state: WheelEventState) {
+  if (state.isEnding) {
+    clearBoundaryIdleUnlock()
+    activeSlide = null
+    return
+  }
+
+  const outer = scrollRef.value
+  const pane = pendingWheelPane
+  if (!outer || !pane) return
+
+  const dy = wheelDeltaY(state.event)
+  if (dy === 0) return
+  const direction: -1 | 1 = dy < 0 ? -1 : 1
+  const directionChanged = !!activeSlide && activeSlide.direction !== direction
+  const canInner = canInnerScroll(pane, dy)
+
+  // 仅新手势 / 换向时重判；同一次手势中途绝不改 owner（防止惯性连全文）
+  if (state.isStart || directionChanged || !activeSlide) {
+    activeSlide = {
+      owner: canInner ? 'inner' : 'outer',
+      direction,
+    }
+  }
+
+  if (WHEEL_DEBUG) {
+    console.log('[wheel-debug]', {
+      isStart: state.isStart,
+      isMomentum: state.isMomentum,
+      canInner,
+      owner: activeSlide.owner,
+      dy: +dy.toFixed(1),
+      action:
+        activeSlide.owner === 'inner' ? (canInner ? 'inner' : 'swallow') : 'outer',
+    })
+  }
+
+  if (activeSlide.owner === 'inner') {
+    if (canInner) {
+      clearBoundaryIdleUnlock()
+      applyInnerScroll(pane, dy)
+    } else {
+      // 已到底：吞掉本串剩余事件（含惯性），绝不 outer.scrollTop
+      armBoundaryIdleUnlock()
+    }
+    return
+  }
+
+  clearBoundaryIdleUnlock()
+  outer.scrollTop += dy
 }
 
 function pageScrollTop(page: number): number {
@@ -352,16 +536,37 @@ function scheduleTranslate(page: number) {
   stopTranslate()
   const key = String(page)
   const cached = translationPages.value[key]
-  if (cached?.status === 'ready') return
+  // 重解析后句 ID 会变：旧译文仍标 ready 时强制重译
+  if (cached?.status === 'ready' && translationMatchesPage(page, cached)) return
   if (!llmConfigured.value) return
   dwellTimer = setTimeout(() => {
     void runTranslate(page)
   }, 1000)
 }
 
+function translationMatchesPage(
+  page: number,
+  cached: { sentences?: Record<string, string> } | undefined,
+): boolean {
+  const trIds = Object.keys(cached?.sentences || {})
+  if (!trIds.length) return true
+  const pageLayout = pages.value.find((p) => p.page === page)
+  if (!pageLayout) return true
+  const docIds = new Set(
+    pageLayout.blocks.flatMap((b) => (b.sentences || []).map((s) => s.id)),
+  )
+  if (!docIds.size) return true
+  return trIds.some((id) => docIds.has(id))
+}
+
 async function runTranslate(page: number) {
   const key = String(page)
-  if (translationPages.value[key]?.status === 'ready') return
+  if (
+    translationPages.value[key]?.status === 'ready' &&
+    translationMatchesPage(page, translationPages.value[key])
+  ) {
+    return
+  }
   translatingPage.value = page
   translateAbort = new AbortController()
   try {
@@ -726,11 +931,33 @@ function blockTextAlign(block: ContentBlock, pageWidth: number): string {
 }
 
 watch(
+  () => props.fontScale,
+  async () => {
+    await nextTick()
+    const next = { ...rightOffsets.value }
+    let changed = false
+    for (const pane of scrollRef.value?.querySelectorAll<HTMLElement>('[data-right-pane]') ?? []) {
+      const pageNo = rightPanePageNo(pane)
+      const max = rightContentMax(pane)
+      const cur = next[pageNo] ?? 0
+      const clamped = Math.min(cur, max)
+      if (clamped !== cur) {
+        next[pageNo] = clamped
+        changed = true
+      }
+    }
+    if (changed) rightOffsets.value = next
+  },
+)
+
+watch(
   () => props.paperId,
   () => {
     stopTranslate()
     clearPinnedSentence()
     translationPages.value = {}
+    rightOffsets.value = {}
+    activeSlide = null
     void bootstrap()
   },
 )
@@ -787,26 +1014,37 @@ defineExpose({ scrollToPage })
     <!-- 解析状态条 -->
     <div
       v-if="paper && paper.status !== 'ready'"
-      class="flex shrink-0 items-center gap-2 border-b border-border/50 bg-[#f7f3ec] px-3 py-2 text-xs"
+      class="shrink-0 border-b border-border/50 bg-[#f7f3ec] px-3 py-2 text-xs"
     >
-      <Loader2 v-if="isParsing" class="h-3.5 w-3.5 animate-spin text-primary" />
-      <AlertCircle v-else-if="paper.status === 'failed'" class="h-3.5 w-3.5 text-destructive" />
-      <span class="text-muted-foreground">
-        {{ STATUS_LABEL[paper.status] }}
-        <template v-if="paper.error_message"> · {{ paper.error_message }}</template>
-        <template v-else-if="isParsing"> · 正在结构化解析，完成后左侧将按原版式复现</template>
-        <template v-else-if="paper.status === 'uploaded'"> · 尚未解析，正在自动开始…</template>
-      </span>
-      <button
-        v-if="needsParse"
-        type="button"
-        class="ml-auto inline-flex items-center gap-1 rounded-lg border border-border bg-white px-2 py-1 hover:bg-[#f2ede6]"
-        :disabled="retrying"
-        @click="onRetry"
-      >
-        <RefreshCw class="h-3.5 w-3.5" :class="retrying && 'animate-spin'" />
-        {{ paper.status === 'failed' ? '重试解析' : '开始解析' }}
-      </button>
+      <div class="flex items-center gap-2">
+        <Loader2 v-if="isParsing" class="h-3.5 w-3.5 animate-spin text-primary" />
+        <AlertCircle v-else-if="paper.status === 'failed'" class="h-3.5 w-3.5 text-destructive" />
+        <span class="min-w-0 flex-1 text-muted-foreground">
+          {{ STATUS_LABEL[paper.status] }}
+          <template v-if="paper.error_message"> · {{ paper.error_message }}</template>
+          <template v-else-if="isParsing">
+            · {{ parseProgressHint }}
+            <span v-if="parseProgressPct > 0" class="tabular-nums">（{{ parseProgressPct }}%）</span>
+          </template>
+          <template v-else-if="paper.status === 'uploaded'"> · 尚未解析，正在自动开始…</template>
+        </span>
+        <button
+          v-if="needsParse"
+          type="button"
+          class="ml-auto inline-flex items-center gap-1 rounded-lg border border-border bg-white px-2 py-1 hover:bg-[#f2ede6]"
+          :disabled="retrying"
+          @click="onRetry"
+        >
+          <RefreshCw class="h-3.5 w-3.5" :class="retrying && 'animate-spin'" />
+          {{ paper.status === 'failed' ? '重试解析' : '开始解析' }}
+        </button>
+      </div>
+      <div v-if="isParsing" class="mt-2 h-1.5 overflow-hidden rounded-full bg-border/60">
+        <div
+          class="h-full rounded-full bg-primary transition-[width] duration-500 ease-out"
+          :style="{ width: `${parseProgressPct}%` }"
+        />
+      </div>
     </div>
 
     <div
@@ -924,10 +1162,12 @@ defineExpose({ scrollToPage })
 
           <div class="h-full min-w-0 flex-1 overflow-hidden bg-[#f2ede6] px-1">
             <div class="flex h-full w-full flex-col overflow-hidden bg-white shadow-sm ring-1 ring-black/5">
-              <div
-                data-right-pane
-                class="h-full overflow-y-auto overscroll-y-contain px-4 py-3"
-              >
+              <div data-right-pane class="relative h-full overflow-clip">
+                <div
+                  data-right-content
+                  class="absolute left-0 right-0 top-0 px-4 py-3"
+                  :style="{ transform: `translate3d(0, ${-(rightOffsets[page.page] || 0)}px, 0)` }"
+                >
                 <template v-if="rightPaneItems(page.page).length">
                   <template v-for="item in rightPaneItems(page.page)" :key="item.id">
                     <div
@@ -1058,6 +1298,15 @@ defineExpose({ scrollToPage })
                   </template>
                 </template>
                 <p v-else class="text-sm text-muted-foreground">本页无内容</p>
+                </div>
+                <div
+                  class="pointer-events-none absolute right-0.5 top-1 bottom-1 w-1 overflow-hidden rounded-full"
+                >
+                  <div
+                    class="w-full rounded-full bg-black/20"
+                    :style="rightThumbStyle(page.page, page.height * renderScale)"
+                  />
+                </div>
               </div>
             </div>
           </div>

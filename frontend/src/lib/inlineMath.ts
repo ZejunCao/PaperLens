@@ -15,7 +15,7 @@ function unwrapDelimited(tok: string): { latex: string; display: boolean } {
   return { latex: tok, display: false }
 }
 
-/** 把 $...$、\\(...\\) 以及 MinerU 无定界符的 \\command 切成文本/公式块 */
+/** 把 $...$、\\(...\\) 以及 MinerU/译文里无定界符的 \\command 切成文本/公式块 */
 export function splitInlineMath(raw: string): RichChunk[] {
   if (!raw) return []
   const delim =
@@ -38,25 +38,93 @@ export function splitInlineMath(raw: string): RichChunk[] {
   return out.filter((c) => c.text !== '')
 }
 
-function isLatexContinue(s: string, j: number): boolean {
-  const ch = s[j]
-  if (!ch) return false
-  if ('\\{}^_'.includes(ch)) return true
-  if (ch === ' ' || ch === '\t') {
-    const n = s[j + 1]
-    if (!n) return false
-    if ('\\{}^_'.includes(n)) return true
-    if (/[0-9a-zA-Z]/.test(n)) {
-      const prev = s[j - 1]
-      return prev === '{' || prev === ' ' || prev === '_' || prev === '^' || prev === '}'
+/**
+ * 从 `\` 起读一段公式：连续命令、括号、上下标、花括号，直到碰到正文/中文。
+ * 避免把 `\left( N^{2} \right)` 拆成 `\l` + `eft(...)`。
+ */
+function readLatexExpr(s: string, start: number): number {
+  let j = start
+  let brace = 0
+  let sawCmd = false
+  while (j < s.length) {
+    const ch = s[j]!
+    if (ch === '\\') {
+      j++
+      if (j < s.length && /[a-zA-Z]/.test(s[j]!)) {
+        while (j < s.length && /[a-zA-Z]/.test(s[j]!)) j++
+        sawCmd = true
+        continue
+      }
+      // \{ \} \, 等
+      if (j < s.length) j++
+      continue
     }
+    if (ch === '{') {
+      brace++
+      j++
+      continue
+    }
+    if (ch === '}') {
+      if (brace > 0) brace--
+      j++
+      continue
+    }
+    if (ch === '^' || ch === '_') {
+      j++
+      continue
+    }
+    if (ch === ' ' || ch === '\t') {
+      const n = s[j + 1]
+      if (!n) break
+      if (n === '\\' || n === '{' || n === '}' || n === '^' || n === '_') {
+        j++
+        continue
+      }
+      if (/[0-9]/.test(n)) {
+        j++
+        continue
+      }
+      if (brace > 0 && /[a-zA-Z]/.test(n)) {
+        j++
+        continue
+      }
+      if (sawCmd && (n === '(' || n === '[' || n === ')' || n === ']')) {
+        j++
+        continue
+      }
+      // `\left( N` / `N ^` 这类公式内部空格
+      if (sawCmd && /[a-zA-Z]/.test(n)) {
+        const prev = s[j - 1]
+        if (prev === '(' || prev === '[' || prev === ')' || prev === ']' || prev === '}' || prev === '\\') {
+          j++
+          continue
+        }
+      }
+      break
+    }
+    if (/[0-9]/.test(ch)) {
+      j++
+      continue
+    }
+    if ((ch === '(' || ch === '[' || ch === ')' || ch === ']') && sawCmd) {
+      j++
+      continue
+    }
+    if (brace > 0 && (/[a-zA-Z.,;:+\-*/=]/.test(ch))) {
+      j++
+      continue
+    }
+    // 单字母变量紧跟在命令后：N in \left( N
+    if (sawCmd && /[a-zA-Z]/.test(ch) && brace === 0) {
+      const prev = s[j - 1]
+      if (prev === '(' || prev === '[' || prev === ' ' || prev === '{') {
+        j++
+        continue
+      }
+    }
+    break
   }
-  if (/[0-9]/.test(ch)) return true
-  if (/[a-zA-Z]/.test(ch)) {
-    const prev = s[j - 1]
-    return prev === '{' || prev === '_' || prev === '^' || prev === ' ' || prev === '\\'
-  }
-  return false
+  return j
 }
 
 function splitMineruLatex(s: string, out: RichChunk[]) {
@@ -72,16 +140,10 @@ function splitMineruLatex(s: string, out: RichChunk[]) {
       return
     }
     if (bs > i) pushText(out, s.slice(i, bs))
-    let j = bs + 1
-    if (j < s.length && /[a-zA-Z]/.test(s[j]!)) {
-      while (j < s.length && /[a-zA-Z]/.test(s[j]!)) j++
-    } else {
-      j++
-    }
-    while (j < s.length && isLatexContinue(s, j)) j++
-    const latex = s.slice(bs, j).trim()
+    const end = readLatexExpr(s, bs)
+    const latex = s.slice(bs, end).trim()
     if (latex.length > 1) out.push({ kind: 'math', text: latex, display: false })
-    else pushText(out, s.slice(bs, j))
-    i = j
+    else pushText(out, s.slice(bs, end))
+    i = end
   }
 }

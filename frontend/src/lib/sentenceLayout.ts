@@ -72,7 +72,8 @@ function blockUnits(block: ContentBlock): Unit[] {
       const bColumn = b.x < columnSplit ? 0 : 1
       if (aColumn !== bColumn) return aColumn - bColumn
     }
-    return Math.abs(a.y - b.y) > 2 ? a.y - b.y : a.x - b.x
+    // 同行公式 bbox 顶边常比文字略高几 px，阈值过小会把公式排到「time complexity」前
+    return Math.abs(a.y - b.y) > 8 ? a.y - b.y : a.x - b.x
   })
   return items
 }

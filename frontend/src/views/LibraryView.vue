@@ -23,6 +23,16 @@ async function onUpload(file: File) {
   }
 }
 
+async function onImportUrl(url: string) {
+  toast.value = ''
+  try {
+    const paper = await store.importFromUrl(url)
+    toast.value = `已从 arXiv 导入：${paper.title || paper.filename}，正在排队解析`
+  } catch {
+    /* store.error 已设置 */
+  }
+}
+
 async function onRename(id: string, title: string) {
   try {
     await store.rename(id, title)
@@ -55,7 +65,7 @@ async function onReparse(id: string) {
 
 <template>
   <div class="mx-auto max-w-6xl space-y-6 p-4 md:p-6">
-    <UploadZone :uploading="store.uploading" @upload="onUpload" />
+    <UploadZone :uploading="store.uploading" @upload="onUpload" @import-url="onImportUrl" />
 
     <div
       v-if="store.error"
@@ -109,7 +119,7 @@ async function onReparse(id: string) {
     >
       <Inbox class="mb-3 h-10 w-10 text-muted-foreground/70" />
       <p class="text-sm font-medium">还没有论文</p>
-      <p class="mt-1 text-xs text-muted-foreground">上传一份 PDF 开始阅读</p>
+      <p class="mt-1 text-xs text-muted-foreground">上传 PDF，或粘贴 arXiv 链接导入</p>
     </div>
 
     <div v-else class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">

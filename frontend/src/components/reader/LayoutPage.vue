@@ -187,7 +187,7 @@ const readingItems = computed(() => {
     const ca = itemColumn(a.x)
     const cb = itemColumn(b.x)
     if (ca !== cb) return ca - cb
-    if (Math.abs(a.y - b.y) > 2) return a.y - b.y
+    if (Math.abs(a.y - b.y) > 8) return a.y - b.y
     return a.x - b.x
   })
   return items
@@ -297,7 +297,7 @@ function columnOverlap(a: DOMRect, b: DOMRect): boolean {
   return ix1 - ix0 > Math.min(a.width, b.width, 24) * 0.18
 }
 
-/** 行内公式渲染后：占用行距；只把不透明的行间公式图当硬障碍 */
+/** 行内公式渲染后：缩放到正文字带内，禁止放大，避免盖住上下行 */
 function fitInlineMathBoxes() {
   const root = rootEl.value
   if (!root) return
@@ -322,12 +322,14 @@ function fitInlineMathBoxes() {
     const textBottom = baseline + (1 - CSS_ASCENDER) * fontSize
 
     let prevBaseline = -1e9
+    let nextBaseline = 1e9
     for (const el of texts) {
       const r = el.getBoundingClientRect()
       if (!columnOverlap(boxR, r)) continue
       const fs = parseFloat(getComputedStyle(el).fontSize) || fontSize
       const b = r.top + CSS_ASCENDER * fs
       if (b < baseline - fs * 0.35) prevBaseline = Math.max(prevBaseline, b)
+      else if (b > baseline + fs * 0.35) nextBaseline = Math.min(nextBaseline, b)
     }
 
     let opaqueAbove = -1e9
@@ -339,27 +341,27 @@ function fitInlineMathBoxes() {
       else if (r.top >= baseline) opaqueBelow = Math.min(opaqueBelow, r.top)
     }
 
-    const pitch = prevBaseline > -1e8 ? baseline - prevBaseline : fontSize * 1.2
+    const pitch = prevBaseline > -1e8 ? baseline - prevBaseline : fontSize * 1.15
     const lineGap = Math.max(0, pitch - fontSize)
-    const maxExtra = Math.max(0, (lineGap - keep) / 2)
+    const maxExtra = Math.max(0, Math.min((lineGap - keep) / 2, fontSize * 0.12))
     const rise = Math.max(0.5, baseline - ink.top)
     const drop = Math.max(0.5, ink.bottom - baseline)
     let s = 1
-    if (opaqueAbove > -1e8 && ink.top < opaqueAbove + keep) {
+    const allowTop = textTop - maxExtra
+    const allowBottom = textBottom + maxExtra
+    s = Math.min(s, (baseline - allowTop) / rise, (allowBottom - baseline) / drop)
+    if (opaqueAbove > -1e8) {
       s = Math.min(s, (baseline - opaqueAbove - keep) / rise)
     }
-    if (opaqueBelow < 1e8 && ink.bottom > opaqueBelow - keep) {
+    if (opaqueBelow < 1e8) {
       s = Math.min(s, (opaqueBelow - keep - baseline) / drop)
     }
-    if (box.dataset.mathComplex === '1' && s >= 0.99) {
-      const allowTop = textTop - maxExtra
-      const allowBottom = textBottom + maxExtra
-      const grow = Math.min((baseline - allowTop) / rise, (allowBottom - baseline) / drop, 1.12)
-      if (grow > 1.02) {
-        s = opaqueBelow < 1e8 ? Math.min(grow, (opaqueBelow - keep - baseline) / drop) : grow
-      }
+    if (nextBaseline < 1e8) {
+      // 给下一行留出空隙，避免 \mathcal/\sqrt 压住下面文字
+      const nextTop = nextBaseline - CSS_ASCENDER * fontSize
+      s = Math.min(s, (nextTop - keep - baseline) / drop)
     }
-    s = Math.max(0.78, Math.min(s, 1.15))
+    s = Math.max(0.55, Math.min(s, 1))
     const originY = baseline - host.getBoundingClientRect().top
     host.style.transformOrigin = `left ${originY}px`
     host.style.transform = Math.abs(s - 1) < 0.02 ? 'none' : `scale(${s})`
@@ -458,17 +460,18 @@ function mathBox(seg: RichSegment) {
       extraAscent: 0,
     }
   }
-  const body = Math.min(Math.max(nb.fontSize || seg.font_size || 10, 9.5), 11)
+  const body = Math.min(Math.max(nb.fontSize || 10, 9), 10.5)
   const baseline = nb.originY ?? b[3]
   const keep = 1
-  const pitch = nb.prevOrigin != null ? baseline - nb.prevOrigin : body * 1.2
+  const pitch = nb.prevOrigin != null ? baseline - nb.prevOrigin : body * 1.15
   const lineGap = Math.max(0, pitch - body)
   let extra = Math.max(0, (lineGap - keep) / 2)
   const textTop = baseline - CSS_ASCENDER * body
   const textBottom = baseline + (1 - CSS_ASCENDER) * body
   extra = Math.min(extra, Math.max(0, textTop - nb.displayPrev - keep))
   extra = Math.min(extra, Math.max(0, nb.displayNext - textBottom - keep))
-  const paintExtra = Math.max(extra, body * 0.28)
+  // 行内公式只允许少量出头，避免 \mathcal/\sqrt 盖住上下行
+  const paintExtra = Math.min(extra, body * 0.12)
   const gapX = inlineMathGapX(seg, body)
   return {
     x: b[0] + gapX,

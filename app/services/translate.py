@@ -195,7 +195,17 @@ def translate_page(paper_id: str, page_no: int, lang: str = "zh-CN") -> Translat
     key = str(page_no)
     existing = file.pages.get(key)
     if existing and existing.status == "ready" and existing.sentences:
-        return get_translations(paper_id, lang)
+        page_layout = document.pages[page_no - 1] if 0 <= page_no - 1 < len(document.pages) else None
+        doc_ids = {
+            sent.id
+            for block in (page_layout.blocks if page_layout else [])
+            for sent in (block.sentences or [])
+        }
+        # 重解析/重映射后句 ID 会变；旧译文仍标 ready 会导致右侧一直显示原文
+        if doc_ids and doc_ids.isdisjoint(existing.sentences.keys()):
+            existing = None
+        else:
+            return get_translations(paper_id, lang)
 
     if not is_llm_configured(cfg):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "尚未配置模型（设置页填写 Base URL 与 Model）")

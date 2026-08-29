@@ -28,6 +28,17 @@ export async function uploadPaper(file: File): Promise<Paper> {
   return res.json()
 }
 
+/** 从 arXiv 链接或裸 ID 导入：服务端本地下载 PDF 后入队解析 */
+export async function importPaperFromUrl(url: string): Promise<Paper> {
+  const res = await fetch('/api/papers/from-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  })
+  if (!res.ok) throw new Error(await parseError(res))
+  return res.json()
+}
+
 export async function fetchPaper(id: string): Promise<Paper> {
   const res = await fetch(`/api/papers/${id}`)
   if (!res.ok) throw new Error(await parseError(res))
