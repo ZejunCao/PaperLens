@@ -11,6 +11,64 @@ from app.parsers.pymupdf_parser import PyMuPDFParser
 FIXTURE = Path(__file__).parent / "fixtures" / "mineru_middle.json"
 
 
+def test_code_container_expands_code_body():
+    from app.parsers.mineru_map import _iter_para_blocks, document_from_middle
+
+    para = [
+        {
+            "type": "code",
+            "bbox": [303, 66, 543, 394],
+            "blocks": [
+                {
+                    "type": "code_body",
+                    "bbox": [303, 66, 543, 394],
+                    "lines": [
+                        {
+                            "bbox": [306, 68, 524, 78],
+                            "spans": [
+                                {
+                                    "type": "text",
+                                    "content": "Algorithm 1 Demo",
+                                    "bbox": [306, 68, 524, 78],
+                                }
+                            ],
+                        },
+                        {
+                            "bbox": [306, 82, 469, 95],
+                            "spans": [
+                                {"type": "text", "content": "for ", "bbox": [306, 82, 335, 95]},
+                                {
+                                    "type": "inline_equation",
+                                    "content": "i = 1 , \\ldots , N",
+                                    "bbox": [336, 82, 391, 95],
+                                },
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+    logical_blocks = _iter_para_blocks(para)
+    assert len(logical_blocks) == 1
+    assert logical_blocks[0][0] == "code"
+    assert logical_blocks[0][1]["lines"]
+
+    doc = document_from_middle(
+        {"pdf_info": [{"page_idx": 0, "page_size": [612, 792], "para_blocks": para}]},
+        paper_id="p1",
+        parser="mineru",
+        parser_version="test",
+        image_map={},
+    )
+    code = doc.blocks[0]
+    assert code.type == "other"
+    assert code.meta.get("kind") == "code"
+    assert "Algorithm 1 Demo" in code.source_text
+    assert code.spans
+    assert any(s.kind == "math" for s in code.segments)
+
+
 def test_get_parser_pymupdf(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("PAPERLENS_PARSER", "pymupdf")
     from app.config import get_settings

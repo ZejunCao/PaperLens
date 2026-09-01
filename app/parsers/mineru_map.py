@@ -19,7 +19,7 @@ from app.schemas.document import (
     TocItem,
 )
 
-_CONTAINER_TYPES = {"image", "table", "chart"}
+_CONTAINER_TYPES = {"image", "table", "chart", "code"}
 _CAPTION_TYPES = {
     "image_caption",
     "table_caption",
@@ -28,7 +28,7 @@ _CAPTION_TYPES = {
     "table_footnote",
     "chart_footnote",
 }
-_BODY_TYPES = {"image_body", "table_body", "chart_body"}
+_BODY_TYPES = {"image_body", "table_body", "chart_body", "code_body"}
 _HTML_TAG = re.compile(r"<[^>]+>")
 # MinerU 偶发把上标数字识别成 \widehat{2}
 _LATEX_WIDEHAT_DIGIT = re.compile(r"\\widehat\s*\{\s*(\d+)\s*\}")
@@ -133,7 +133,8 @@ def _normalize_latex(tex: str) -> str:
     if not s:
         return s
     s = _LATEX_WIDEHAT_DIGIT.sub(r"\1", s)
-    # 多余空格不影响渲染，但会放大 \left/\right 视觉体量；适度压缩
+    # \times 是 LaTeX 乘号 ×；N{\times}F 避免 KaTeX 把 N\times 里的 \t 当 tab
+    s = re.sub(r"([0-9A-Za-z])\s*\\times\s*([0-9A-Za-z])", r"\1{\\times}\2", s)
     s = _LATEX_SPACEY.sub(" ", s)
     return s
 
@@ -431,6 +432,8 @@ def _block_type_from_mineru(mtype: str, text_level: int | None, source: str) -> 
         return "caption"
     if t in {"index"}:
         return "other"
+    if t in {"code", "code_body"}:
+        return "other"
     if text_level and text_level >= 1:
         return "section" if text_level > 1 else "title"
     return "paragraph"
@@ -481,6 +484,8 @@ def _iter_para_blocks(blocks: list[dict[str, Any]]) -> list[tuple[str, dict[str,
                             logical = "table"
                         elif "image" in ctype or "chart" in ctype:
                             logical = "figure"
+                        elif "code" in ctype:
+                            logical = "code"
                         else:
                             logical = mtype
                         merged = dict(child)
@@ -553,7 +558,7 @@ def document_from_middle(
             if img_path:
                 meta["image_path"] = img_path
                 meta["kind"] = "formula" if logical in {"formula", "interline_equation", "equation"} else (
-                    "table" if logical == "table" else "figure"
+                    "table" if logical == "table" else ("code" if logical == "code" else "figure")
                 )
                 img_id = new_id("img")
                 meta["image_id"] = img_id
@@ -572,6 +577,8 @@ def document_from_middle(
                 continue
             level = raw.get("level") or raw.get("text_level")
             level_i = int(level) if level is not None else None
+            if logical == "code":
+                meta.setdefault("kind", "code")
             block = _emit_content_block(
                 mtype=logical,
                 page=page_no,

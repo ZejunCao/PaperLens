@@ -46,14 +46,21 @@ const retrying = ref(false)
 const currentPage = ref(1)
 const llmConfigured = ref(false)
 const translationPages = ref<Record<string, PageTranslation>>({})
-const translatingPage = ref<number | null>(null)
+/** 正在请求翻译的页（排队执行；划走不再 abort） */
+const translatingPages = ref<Set<number>>(new Set())
+const translateAllRunning = ref(false)
+const translateAllDone = ref(0)
+const translateAllTotal = ref(0)
 const pinnedSentence = ref<{ id: string; page: number; blockId: string; fallback: string } | null>(null)
 let hoverClearTimer: ReturnType<typeof setTimeout> | null = null
 let hoveredSentenceId: string | null = null
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let dwellTimer: ReturnType<typeof setTimeout> | null = null
+/** 仅卸载时 abort；换页/全文队列不取消进行中的请求 */
 let translateAbort: AbortController | null = null
+let translateQueue: number[] = []
+let translateDrainPromise: Promise<void> | null = null
 let scrollRaf = 0
 let resizeObserver: ResizeObserver | null = null
 const spacePressed = ref(false)
@@ -405,22 +412,41 @@ function rightThumbStyle(pageNo: number, paneHeight: number) {
   }
 }
 
+/** 指针是否在阅读区矩形内（含盖在分割条上的外层 handle） */
+function pointerOverScrollArea(e: WheelEvent, outer: HTMLElement): boolean {
+  const r = outer.getBoundingClientRect()
+  return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom
+}
+
 /**
  * 右栏页内滚 + 全文翻页：
  * - 新手势开始时看能不能页内滚，整次手势锁死 owner
  * - owner=inner 且已到底：只吞事件，惯性绝不能连到全文
  * - 到底后再无 wheel 一小段：解锁，下一次滑重新判定（可全文）
+ * - 悬停分割条/左栏缝隙：直接全文滚动（外层 handle 不在 scroll 子树里，须自己吃 wheel）
  * 惯性/新手势识别用 wheel-gestures（isStart / isEnding）。
  */
 function onRightPaneWheel(e: WheelEvent) {
   const outer = scrollRef.value
-  const pane = outer ? resolveRightPane(e, outer) : null
-  if (!outer || !pane || e.deltaY === 0) return
+  if (!outer || e.deltaY === 0) return
+  if (!pointerOverScrollArea(e, outer)) return
 
+  const pane = resolveRightPane(e, outer)
+  if (pane) {
+    e.preventDefault()
+    e.stopPropagation()
+    pendingWheelPane = pane
+    wheelGestures?.feedWheel(e)
+    return
+  }
+
+  // 分割条、页间缝等：全文翻页
   e.preventDefault()
   e.stopPropagation()
-  pendingWheelPane = pane
-  wheelGestures?.feedWheel(e)
+  clearBoundaryIdleUnlock()
+  activeSlide = null
+  pendingWheelPane = null
+  outer.scrollTop += wheelDeltaY(e)
 }
 
 function clearBoundaryIdleUnlock() {
@@ -523,25 +549,64 @@ async function loadTranslations() {
   }
 }
 
-function stopTranslate() {
+function clearDwellTimer() {
   if (dwellTimer) {
     clearTimeout(dwellTimer)
     dwellTimer = null
   }
+}
+
+/** 卸载时才真正取消；换页不再 abort，避免「翻译中」滑走白做功、后端仍在跑。 */
+function stopTranslate() {
+  clearDwellTimer()
+  translateQueue = []
+  translateAllRunning.value = false
   translateAbort?.abort()
   translateAbort = null
+  translatingPages.value = new Set()
+}
+
+function pageNeedsTranslate(page: number): boolean {
+  const cached = translationPages.value[String(page)]
+  if (cached?.status === 'ready' && translationMatchesPage(page, cached)) return false
+  return true
+}
+
+function enqueueTranslate(page: number, preferFront = false) {
+  if (!llmConfigured.value) return
+  if (!pageNeedsTranslate(page)) return
+  if (translatingPages.value.has(page) || translateQueue.includes(page)) return
+  if (preferFront) translateQueue.unshift(page)
+  else translateQueue.push(page)
+  void drainTranslateQueue()
 }
 
 function scheduleTranslate(page: number) {
-  stopTranslate()
-  const key = String(page)
-  const cached = translationPages.value[key]
-  // 重解析后句 ID 会变：旧译文仍标 ready 时强制重译
-  if (cached?.status === 'ready' && translationMatchesPage(page, cached)) return
+  clearDwellTimer()
+  if (!pageNeedsTranslate(page)) return
   if (!llmConfigured.value) return
   dwellTimer = setTimeout(() => {
-    void runTranslate(page)
+    dwellTimer = null
+    enqueueTranslate(page, true)
   }, 1000)
+}
+
+async function translateAllPages(): Promise<'ok' | 'unconfigured' | 'done'> {
+  if (!llmConfigured.value) return 'unconfigured'
+  if (!pages.value.length) return 'done'
+  clearDwellTimer()
+  const pending = pages.value.map((p) => p.page).filter((n) => pageNeedsTranslate(n))
+  if (!pending.length) return 'done'
+  translateAllRunning.value = true
+  translateAllDone.value = 0
+  translateAllTotal.value = pending.length
+  for (const n of pending) {
+    if (!translatingPages.value.has(n) && !translateQueue.includes(n)) {
+      translateQueue.push(n)
+    }
+  }
+  await drainTranslateQueue()
+  return 'ok'
 }
 
 function translationMatchesPage(
@@ -559,18 +624,65 @@ function translationMatchesPage(
   return trIds.some((id) => docIds.has(id))
 }
 
-async function runTranslate(page: number) {
-  const key = String(page)
-  if (
-    translationPages.value[key]?.status === 'ready' &&
-    translationMatchesPage(page, translationPages.value[key])
-  ) {
-    return
+async function drainTranslateQueue() {
+  if (translateDrainPromise) return translateDrainPromise
+  translateDrainPromise = (async () => {
+    try {
+      while (translateQueue.length) {
+        const page = translateQueue.shift()!
+        if (!pageNeedsTranslate(page) || translatingPages.value.has(page)) {
+          if (translateAllRunning.value) {
+            translateAllDone.value = Math.min(translateAllTotal.value, translateAllDone.value + 1)
+          }
+          continue
+        }
+        await runTranslate(page)
+        if (translateAllRunning.value) {
+          translateAllDone.value = Math.min(translateAllTotal.value, translateAllDone.value + 1)
+        }
+      }
+    } finally {
+      translateDrainPromise = null
+      if (!translateQueue.length) translateAllRunning.value = false
+    }
+  })()
+  return translateDrainPromise
+}
+
+function pageTranslateUi(pageNo: number) {
+  const key = String(pageNo)
+  const cached = translationPages.value[key]
+  const translating = translatingPages.value.has(pageNo)
+  const failed = cached?.status === 'failed'
+  return {
+    title: translating ? '翻译中…' : failed ? '翻译失败，点击重试' : '重新翻译本页',
+    disabled: translating || !llmConfigured.value,
+    visible: failed || translating,
   }
-  translatingPage.value = page
-  translateAbort = new AbortController()
+}
+
+function retranslatePage(pageNo: number) {
+  if (!llmConfigured.value || translatingPages.value.has(pageNo)) return
+  clearDwellTimer()
+  const key = String(pageNo)
+  const pagesMap = { ...translationPages.value }
+  delete pagesMap[key]
+  translationPages.value = pagesMap
+  void runTranslate(pageNo, { force: true })
+}
+
+async function runTranslate(page: number, opts?: { force?: boolean }) {
+  const key = String(page)
+  if (!opts?.force && !pageNeedsTranslate(page)) return
+
+  const next = new Set(translatingPages.value)
+  next.add(page)
+  translatingPages.value = next
+
+  const ac = new AbortController()
+  translateAbort = ac
   try {
-    const data = await translatePaperPage(props.paperId, page, translateAbort.signal)
+    const data = await translatePaperPage(props.paperId, page, ac.signal, !!opts?.force)
     llmConfigured.value = data.configured
     translationPages.value = data.pages || {}
   } catch (e) {
@@ -578,6 +690,8 @@ async function runTranslate(page: number) {
     const msg = e instanceof Error ? e.message : String(e)
     if (msg.includes('尚未配置')) {
       llmConfigured.value = false
+      translateQueue = []
+      translateAllRunning.value = false
       return
     }
     const pagesMap = { ...translationPages.value }
@@ -588,7 +702,10 @@ async function runTranslate(page: number) {
     }
     translationPages.value = pagesMap
   } finally {
-    if (translatingPage.value === page) translatingPage.value = null
+    if (translateAbort === ac) translateAbort = null
+    const after = new Set(translatingPages.value)
+    after.delete(page)
+    translatingPages.value = after
   }
 }
 
@@ -606,7 +723,8 @@ function sentenceView(pageNo: number, sent: Sentence): { text: string; pending: 
   const zh = translationPages.value[String(pageNo)]?.sentences?.[sent.id]
   if (zh) return { text: zh, pending: false }
   const pending =
-    translatingPage.value === pageNo || translationPages.value[String(pageNo)]?.status === 'pending'
+    translatingPages.value.has(pageNo) ||
+    translationPages.value[String(pageNo)]?.status === 'pending'
   return { text: sentenceText(sent), pending }
 }
 
@@ -828,6 +946,24 @@ function figureSrc(block: ContentBlock): string | null {
   return typeof path === 'string' && path ? paperAssetUrl(props.paperId, path) : null
 }
 
+function formulaSegImage(seg: { image_path?: string | null }): string | null {
+  const path = seg.image_path
+  return typeof path === 'string' && path ? paperAssetUrl(props.paperId, path) : null
+}
+
+function formulaEqTag(latex: string): string {
+  const m = latex.match(/\\tag\s*\{([^}]+)\}/)
+  if (!m) return ''
+  const n = (m[1] || '').trim()
+  if (!n) return ''
+  return n.startsWith('(') ? n : `(${n})`
+}
+
+/** 右侧行间公式：去掉 \\tag，编号单独右对齐，避免和 KaTeX 挤在一起 */
+function formulaDisplayLatex(latex: string): string {
+  return latex.replace(/\\tag\s*\{[^}]*\}/g, '').trim()
+}
+
 type FigureCell = { figure: ContentBlock; caption?: ContentBlock }
 type RightPaneItem =
   | { kind: 'block'; id: string; block: ContentBlock }
@@ -1006,7 +1142,14 @@ onBeforeUnmount(() => {
   window.removeEventListener('keyup', onWindowKeyup)
 })
 
-defineExpose({ scrollToPage })
+defineExpose({
+  scrollToPage,
+  translateAllPages,
+  translateAllRunning,
+  translateAllDone,
+  translateAllTotal,
+  llmConfigured,
+})
 </script>
 
 <template>
@@ -1162,7 +1305,39 @@ defineExpose({ scrollToPage })
 
           <div class="h-full min-w-0 flex-1 overflow-hidden bg-[#f2ede6] px-1">
             <div class="flex h-full w-full flex-col overflow-hidden bg-white shadow-sm ring-1 ring-black/5">
-              <div data-right-pane class="relative h-full overflow-clip">
+              <div data-right-pane class="group/right relative h-full overflow-clip">
+                <div
+                  v-if="llmConfigured"
+                  class="absolute right-2 top-2 z-10 flex items-center gap-1"
+                >
+                  <span
+                    class="rounded bg-black/40 px-1.5 py-0.5 text-[10px] tabular-nums text-white"
+                  >
+                    {{ page.page }}
+                  </span>
+                  <button
+                    type="button"
+                    class="inline-flex h-6 w-6 items-center justify-center rounded-md bg-white/90 text-muted-foreground shadow-sm ring-1 ring-black/10 transition hover:bg-white hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                    :class="
+                      pageTranslateUi(page.page).visible
+                        ? 'opacity-100'
+                        : 'opacity-0 group-hover/right:opacity-100 focus-visible:opacity-100'
+                    "
+                    :title="pageTranslateUi(page.page).title"
+                    :disabled="pageTranslateUi(page.page).disabled"
+                    @click.stop="retranslatePage(page.page)"
+                  >
+                    <Loader2
+                      v-if="translatingPages.has(page.page)"
+                      class="h-3.5 w-3.5 animate-spin"
+                    />
+                    <RefreshCw
+                      v-else
+                      class="h-3.5 w-3.5"
+                      :class="translationPages[String(page.page)]?.status === 'failed' && 'text-destructive'"
+                    />
+                  </button>
+                </div>
                 <div
                   data-right-content
                   class="absolute left-0 right-0 top-0 px-4 py-3"
@@ -1201,9 +1376,9 @@ defineExpose({ scrollToPage })
                       </template>
                     </div>
                     <template v-else v-for="block in [item.block]" :key="block.id">
-                    <p
+                    <div
                       v-if="block.type === 'formula' && block.segments?.length"
-                      class="mb-5 leading-[1.8] text-foreground/90"
+                      class="relative mb-5 px-8 text-foreground/90"
                       :class="blockTextAlign(block, page.width)"
                       :data-sentence-id="block.sentences?.[0]?.id || `block:${block.id}`"
                       :style="{ fontSize: `${fontPx}px` }"
@@ -1213,16 +1388,30 @@ defineExpose({ scrollToPage })
                       @pointerleave="setHoveredSentence(null)"
                     >
                       <template v-for="(seg, si) in block.segments" :key="`${block.id}-seg-${si}`">
+                        <!-- 优先用 PDF 裁剪图（与左侧一致）；MinerU LaTeX 常把 sim 误成 \\sin -->
+                        <img
+                          v-if="formulaSegImage(seg)"
+                          :src="formulaSegImage(seg)!"
+                          alt=""
+                          class="mx-auto max-h-40 max-w-[calc(100%-2.5em)] object-contain"
+                          draggable="false"
+                        />
                         <KatexView
-                          v-if="seg.kind === 'math' && seg.latex"
-                          class="mx-0.5"
-                          :latex="seg.latex"
+                          v-else-if="seg.kind === 'math' && seg.latex"
+                          class="mx-auto"
+                          :latex="formulaDisplayLatex(seg.latex)"
                           :display="true"
                           :title="seg.latex"
                         />
                         <span v-else>{{ seg.text }}</span>
+                        <span
+                          v-if="formulaEqTag(seg.latex || '')"
+                          class="absolute right-1 top-1/2 -translate-y-1/2 text-[0.95em] text-foreground/80"
+                        >
+                          {{ formulaEqTag(seg.latex || '') }}
+                        </span>
                       </template>
-                    </p>
+                    </div>
                     <ul
                       v-else-if="block.type === 'list_item'"
                       class="mb-5 list-disc pl-5 leading-[1.8] text-foreground/90"

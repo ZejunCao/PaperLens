@@ -19,7 +19,8 @@ def read_translations(paper_id: str, db: Session = Depends(get_db)) -> Translati
 def translate_paper_page(
     paper_id: str,
     page: int,
+    force: bool = False,
     db: Session = Depends(get_db),
 ) -> TranslationOut:
     papers_service.get_paper(db, paper_id)
-    return translate_page(paper_id, page)
+    return translate_page(paper_id, page, force=force)

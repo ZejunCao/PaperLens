@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
-import { AlertCircle, ArrowLeft, Loader2, Minus, Plus, RotateCcw } from 'lucide-vue-next'
+import { AlertCircle, ArrowLeft, Languages, Loader2, Minus, Plus, RotateCcw } from 'lucide-vue-next'
 import SplitDocumentView from '@/components/reader/SplitDocumentView.vue'
 import ReaderRightRail from '@/components/reader/ReaderRightRail.vue'
 import { usePapersStore } from '@/stores/papers'
@@ -34,9 +34,57 @@ const paperStatus = ref<Paper['status'] | null>(null)
 const docRef = ref<InstanceType<typeof SplitDocumentView> | null>(null)
 const splitRowRef = ref<HTMLElement | null>(null)
 const dragging = ref(false)
+const translateBusy = ref(false)
+const translateProgress = ref('')
+const toast = ref('')
+let toastTimer: ReturnType<typeof setTimeout> | null = null
 
 const paper = computed(() => store.items.find((p) => p.id === props.id) ?? null)
 const title = computed(() => paper.value?.title || paper.value?.filename || '论文')
+
+function showToast(msg: string) {
+  toast.value = msg
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toast.value = ''
+    toastTimer = null
+  }, 3200)
+}
+
+function unwrapMaybeRef<T>(v: T | { value: T } | undefined | null): T | undefined {
+  if (v == null) return undefined
+  if (typeof v === 'object' && v !== null && 'value' in v) return (v as { value: T }).value
+  return v as T
+}
+
+async function onTranslateAll() {
+  const doc = docRef.value
+  if (!doc || translateBusy.value) return
+  translateBusy.value = true
+  translateProgress.value = '排队中…'
+  const tick = window.setInterval(() => {
+    const running = unwrapMaybeRef(doc.translateAllRunning)
+    const done = unwrapMaybeRef(doc.translateAllDone) ?? 0
+    const total = unwrapMaybeRef(doc.translateAllTotal) ?? 0
+    if (running && total > 0) translateProgress.value = `${done}/${total}`
+  }, 200)
+  try {
+    const result = await doc.translateAllPages()
+    if (result === 'unconfigured') {
+      showToast('尚未配置翻译模型，请先到设置页填写 Base URL 与 Model')
+    } else if (result === 'done') {
+      showToast('全部页面已有译文')
+    } else {
+      showToast('全文翻译完成')
+    }
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : String(e))
+  } finally {
+    clearInterval(tick)
+    translateBusy.value = false
+    translateProgress.value = ''
+  }
+}
 
 onMounted(async () => {
   loadingMeta.value = true
@@ -117,11 +165,18 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointermove', onSplitPointerMove)
   window.removeEventListener('pointerup', onSplitPointerUp)
+  if (toastTimer) clearTimeout(toastTimer)
 })
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col bg-[#f2ede6]">
+  <div class="relative flex h-full min-h-0 flex-col bg-[#f2ede6]">
+    <p
+      v-if="toast"
+      class="absolute left-1/2 top-14 z-50 -translate-x-1/2 rounded-lg border border-border/70 bg-white px-3 py-1.5 text-xs shadow-md"
+    >
+      {{ toast }}
+    </p>
     <header
       class="grid h-11 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border/60 bg-[#f7f3ec]/95 px-2 md:px-3"
     >
@@ -211,6 +266,18 @@ onUnmounted(() => {
             <RotateCcw class="h-3.5 w-3.5" />
           </button>
         </div>
+
+        <button
+          type="button"
+          class="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border/70 bg-white px-2.5 text-xs text-foreground hover:bg-[#f2ede6] disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="translateBusy || !pageCount"
+          :title="translateBusy ? '正在逐页翻译…' : '不等待滑动，排队翻译全部页面'"
+          @click="onTranslateAll"
+        >
+          <Loader2 v-if="translateBusy" class="h-3.5 w-3.5 animate-spin" />
+          <Languages v-else class="h-3.5 w-3.5" />
+          <span>{{ translateBusy ? `翻译中 ${translateProgress}` : '全文翻译' }}</span>
+        </button>
       </div>
 
       <div class="justify-self-end" />

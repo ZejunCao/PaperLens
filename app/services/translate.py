@@ -98,24 +98,35 @@ def _parse_model_json(content: str) -> dict[str, str]:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    data = json.loads(text)
-    if isinstance(data, dict) and isinstance(data.get("sentences"), list):
-        rows = data["sentences"]
-    elif isinstance(data, list):
-        rows = data
-    elif isinstance(data, dict) and all(isinstance(v, str) for v in data.values()):
-        return {str(k): str(v) for k, v in data.items()}
-    else:
-        raise ValueError("模型返回 JSON 结构无法识别")
-    mapped: dict[str, str] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        sid = str(row.get("id") or "").strip()
-        zh = str(row.get("zh") or row.get("text") or "").strip()
-        if sid:
-            mapped[sid] = zh
-    return mapped
+
+    def _extract(data: object) -> dict[str, str]:
+        if isinstance(data, dict) and isinstance(data.get("sentences"), list):
+            rows = data["sentences"]
+        elif isinstance(data, list):
+            rows = data
+        elif isinstance(data, dict) and all(isinstance(v, str) for v in data.values()):
+            return {str(k): str(v) for k, v in data.items()}
+        else:
+            raise ValueError("模型返回 JSON 结构无法识别")
+        mapped: dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sid = str(row.get("id") or "").strip()
+            zh = str(row.get("zh") or row.get("text") or "").strip()
+            if sid:
+                mapped[sid] = zh
+        return mapped
+
+    try:
+        return _extract(json.loads(text))
+    except json.JSONDecodeError:
+        try:
+            import json_repair
+
+            return _extract(json_repair.loads(text))
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(str(e)) from e
 
 
 def _chat_translate(items: list[tuple[str, str]], cfg: dict) -> dict[str, str]:
@@ -136,6 +147,7 @@ def _chat_translate(items: list[tuple[str, str]], cfg: dict) -> dict[str, str]:
                     "You are a professional academic translator. Translate English paper sentences "
                     "into Simplified Chinese. Keep technical terms, paper titles, and model names "
                     "consistent. Do not translate LaTeX, citations like [12], or equation numbers. "
+                    "In zh fields never use ASCII double quotes; use corner quotes 「」 for quoted terms. "
                     "Return JSON: {\"sentences\": [{\"id\": \"...\", \"zh\": \"...\"}, ...]} "
                     "with the same ids and count as the input, in the same order."
                 ),
@@ -183,7 +195,13 @@ def _chat_translate(items: list[tuple[str, str]], cfg: dict) -> dict[str, str]:
     return {sid: mapped[sid].strip() for sid, _ in items}
 
 
-def translate_page(paper_id: str, page_no: int, lang: str = "zh-CN") -> TranslationOut:
+def translate_page(
+    paper_id: str,
+    page_no: int,
+    lang: str = "zh-CN",
+    *,
+    force: bool = False,
+) -> TranslationOut:
     document = load_document(paper_id)
     if document is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文档尚未解析完成")
@@ -194,7 +212,12 @@ def translate_page(paper_id: str, page_no: int, lang: str = "zh-CN") -> Translat
     file = load_translation_file(paper_id, lang)
     key = str(page_no)
     existing = file.pages.get(key)
-    if existing and existing.status == "ready" and existing.sentences:
+    if (
+        not force
+        and existing
+        and existing.status == "ready"
+        and existing.sentences
+    ):
         page_layout = document.pages[page_no - 1] if 0 <= page_no - 1 < len(document.pages) else None
         doc_ids = {
             sent.id

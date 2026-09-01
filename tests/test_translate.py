@@ -13,7 +13,7 @@ from app.database import Base, get_db
 from app.main import create_app
 from app.schemas.document import ContentBlock, Document, PageLayout, Sentence
 from app.services.documents import save_document
-from app.services.translate import collect_page_sentences
+from app.services.translate import collect_page_sentences, _parse_model_json
 
 
 @pytest.fixture()
@@ -243,3 +243,14 @@ def test_collect_page_sentences_keeps_cross_page_sentence_on_start_page():
 
     assert collect_page_sentences(doc, 1) == [("s_c", cross_page_text)]
     assert collect_page_sentences(doc, 2) == [("s_d", "Sentence D.")]
+
+
+def test_parse_model_json_repairs_unescaped_quotes_in_zh():
+    broken = (
+        '{"sentences":[{"id":"s_352e64d532",'
+        '"zh":"最近的工作提出了具有恒定大小内存且时间复杂度与序列长度呈线性关系的"线性 Transformer"。'
+        '"}]}'
+    )
+    mapped = _parse_model_json(broken)
+    assert mapped["s_352e64d532"].startswith("最近的工作提出了")
+    assert "线性 Transformer" in mapped["s_352e64d532"]

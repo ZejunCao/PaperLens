@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
+import { normalizeSpacedLatex } from '@/lib/inlineMath'
 
 const props = withDefaults(
   defineProps<{
@@ -20,7 +21,7 @@ const el = ref<HTMLElement | null>(null)
 const error = ref('')
 const layout = computed(() => !!props.fitWidth && props.fitWidth >= 2)
 
-const rendered = computed(() => (props.latex || '').trim())
+const rendered = computed(() => normalizeSpacedLatex((props.latex || '').trim()))
 
 function paint() {
   if (!el.value) return

@@ -55,8 +55,10 @@ export async function translatePaperPage(
   paperId: string,
   page: number,
   signal?: AbortSignal,
+  force = false,
 ): Promise<TranslationState> {
-  const res = await fetch(`/api/papers/${paperId}/translations/pages/${page}`, {
+  const qs = force ? '?force=true' : ''
+  const res = await fetch(`/api/papers/${paperId}/translations/pages/${page}${qs}`, {
     method: 'POST',
     signal,
   })

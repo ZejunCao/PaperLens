@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PageLayout, RichSegment, TextSpan } from '@/types/document'
 import { paperAssetUrl } from '@/api/papers'
 import KatexView from '@/components/reader/KatexView.vue'
+import { normalizeSpacedLatex } from '@/lib/inlineMath'
 import { encodeSentRanges, mathUnitKey, pageUnitAlign, pickSentenceIdFromTarget } from '@/lib/sentenceLayout'
 
 const props = defineProps<{
@@ -576,7 +577,7 @@ function displayMathImgStyle(seg: RichSegment) {
 }
 
 function displayMathLatex(seg: RichSegment): string {
-  return (seg.latex || seg.text || '').replace(/\\tag\s*\{[^}]*\}/g, '').trim()
+  return normalizeSpacedLatex((seg.latex || seg.text || '').replace(/\\tag\s*\{[^}]*\}/g, '').trim())
 }
 
 function mathFitWidth(seg: RichSegment): number {
@@ -871,7 +872,7 @@ onBeforeUnmount(() => {
         <span class="math-strut" aria-hidden="true" />
         <KatexView
           class="layout-inline"
-          :latex="item.seg.latex || item.seg.text || ''"
+          :latex="normalizeSpacedLatex(item.seg.latex || item.seg.text || '')"
           :display="false"
           :title="item.seg.latex || ''"
           @painted="scheduleFitInlineMath"
