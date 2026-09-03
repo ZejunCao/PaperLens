@@ -66,7 +66,8 @@ Worker 在 FastAPI `lifespan` 里起独立线程，轮询 `jobs` 表，避免阻
 
 - 调用 `mineru.cli.common.do_parse`，写出 `middle.json` 与 `content_list`。
 - 公式、表格开启；不画 layout/span 调试框。
-- CUDA 不可用时回退 CPU；OOM 时再试 CPU。
+- CUDA 不可用时回退 CPU；加载模型前读取实时空闲显存，低于后端预算时直接失败并给出所需/空闲显存，不再等模型 OOM。默认预算为 pipeline 4 GiB、VLM/hybrid 8 GiB，可用 `PAPERLENS_MINERU_GPU_MEMORY_GB` 覆盖。
+- 预检通过后若仍发生动态 OOM（例如超大页面或显存碎片），仍保留回退 CPU 的兜底。
 - 图片从 MinerU 输出目录拷到 `data/papers/{id}/images/`，路径写入 Document。
 - **优先用 `middle.json`**（行/span 级 bbox）。`content_list` 的框常是段级 0–1000 归一化，只作回退。
 

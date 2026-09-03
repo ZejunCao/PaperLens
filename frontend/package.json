@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
+    "test:inline-math": "node tests/inlineMath.mjs",
+    "test:reader": "node tests/inlineMath.mjs && node tests/readerLayout.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

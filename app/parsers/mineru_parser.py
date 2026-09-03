@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import get_settings
@@ -19,6 +20,109 @@ from app.parsers.mineru_map import (
 from app.schemas.document import Document
 
 logger = logging.getLogger("paperlens.parser.mineru")
+
+_GIB = 1024**3
+# MinerU 官方最低显存要求：pipeline 4GB，本地 VLM / hybrid 8GB；HTTP client
+# 的模型在远端，仅保留本地轻量处理所需的 2GB。
+_BACKEND_MIN_GPU_GB = {
+    "pipeline": 4.0,
+    "http-client": 2.0,
+    "vlm": 8.0,
+    "hybrid": 8.0,
+}
+
+
+@dataclass(frozen=True)
+class _GpuMemorySnapshot:
+    index: int
+    name: str
+    free_bytes: int
+    total_bytes: int
+    reusable_bytes: int = 0
+
+
+def _estimate_gpu_memory_gb(backend: str, configured_gb: float = 0.0) -> float:
+    """按后端估算启动所需显存；显式配置优先。"""
+    if configured_gb > 0:
+        return configured_gb
+    normalized = backend.strip().lower()
+    if "http-client" in normalized:
+        return _BACKEND_MIN_GPU_GB["http-client"]
+    if "hybrid" in normalized:
+        return _BACKEND_MIN_GPU_GB["hybrid"]
+    if "vlm" in normalized:
+        return _BACKEND_MIN_GPU_GB["vlm"]
+    if normalized == "pipeline":
+        return _BACKEND_MIN_GPU_GB["pipeline"]
+    # 未知的本地后端按较重的 VLM 预算，避免低估后直接 OOM。
+    return _BACKEND_MIN_GPU_GB["vlm"]
+
+
+def _cuda_device_index(torch_module: object, device: str) -> int:
+    if ":" in device:
+        try:
+            return int(device.split(":", 1)[1])
+        except ValueError:
+            pass
+    return int(torch_module.cuda.current_device())  # type: ignore[attr-defined]
+
+
+def _gpu_memory_snapshot(device: str) -> _GpuMemorySnapshot | None:
+    """读取 CUDA 驱动报告的实时空闲显存，不触发 MinerU 模型加载。"""
+    try:
+        import torch
+
+        index = _cuda_device_index(torch, device)
+        free_bytes, total_bytes = torch.cuda.mem_get_info(index)
+        # 同一进程已经保留的 PyTorch 显存可被后续解析复用；否则模型常驻后，
+        # 第二篇论文会因只看驱动层 free 而被误判。
+        reusable_bytes = int(torch.cuda.memory_reserved(index))
+        name = str(torch.cuda.get_device_name(index))
+        return _GpuMemorySnapshot(
+            index=index,
+            name=name,
+            free_bytes=int(free_bytes),
+            total_bytes=int(total_bytes),
+            reusable_bytes=reusable_bytes,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("无法读取 CUDA 显存信息，跳过 MinerU 启动前显存检查", exc_info=True)
+        return None
+
+
+def _ensure_gpu_memory(backend: str, device: str, configured_gb: float = 0.0) -> None:
+    required_gb = _estimate_gpu_memory_gb(backend, configured_gb)
+    snapshot = _gpu_memory_snapshot(device)
+    if snapshot is None:
+        return
+
+    free_gb = snapshot.free_bytes / _GIB
+    total_gb = snapshot.total_bytes / _GIB
+    reusable_gb = snapshot.reusable_bytes / _GIB
+    usable_gb = free_gb + reusable_gb
+    logger.info(
+        "MinerU GPU 显存预检: backend=%s gpu=%s(%s) required=%.2fGiB "
+        "free=%.2fGiB reusable=%.2fGiB total=%.2fGiB",
+        backend,
+        snapshot.index,
+        snapshot.name,
+        required_gb,
+        free_gb,
+        reusable_gb,
+        total_gb,
+    )
+    if usable_gb + 1e-9 >= required_gb:
+        return
+
+    shortage_gb = required_gb - usable_gb
+    raise ParserError(
+        "MinerU 启动前显存检查未通过："
+        f"GPU {snapshot.index}（{snapshot.name}）当前空闲 {free_gb:.2f} GiB / "
+        f"总计 {total_gb:.2f} GiB，{backend} 后端预计至少需要 {required_gb:.2f} GiB，"
+        f"仍缺少 {shortage_gb:.2f} GiB。模型尚未启动。请释放显存、改用 "
+        "PAPERLENS_MINERU_DEVICE=cpu，或通过 PAPERLENS_MINERU_GPU_MEMORY_GB "
+        "设置适合当前模型的检查阈值。"
+    )
 
 
 def _is_oom(exc: BaseException) -> bool:
@@ -107,11 +211,17 @@ class MinerUParser(BaseParser):
         settings = get_settings()
         backend = (settings.mineru_backend or "pipeline").strip()
         device = (settings.mineru_device or "cuda").strip().lower()
-        if device == "cuda" and not _cuda_available():
+        if device.startswith("cuda") and not _cuda_available():
             logger.warning("CUDA 不可用，MinerU 回退 CPU")
             device = "cpu"
             if backend not in {"pipeline"} and "hybrid" in backend:
                 backend = "pipeline"
+        elif device.startswith("cuda"):
+            _ensure_gpu_memory(
+                backend,
+                device,
+                getattr(settings, "mineru_gpu_memory_gb", 0.0),
+            )
 
         output_dir.mkdir(parents=True, exist_ok=True)
         mineru_dir = output_dir / "mineru"

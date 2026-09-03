@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PageLayout, RichSegment, TextSpan } from '@/types/document'
 import { paperAssetUrl } from '@/api/papers'
 import KatexView from '@/components/reader/KatexView.vue'
+import { displayFormulaLane, type FormulaBBox } from '@/lib/formulaLayout'
 import { normalizeSpacedLatex } from '@/lib/inlineMath'
 import { encodeSentRanges, mathUnitKey, pageUnitAlign, pickSentenceIdFromTarget } from '@/lib/sentenceLayout'
 
@@ -376,6 +377,17 @@ function columnBox(x: number): readonly [number, number] {
   return x < mid ? c.left : c.right
 }
 
+function displayLaneBox(seg: RichSegment): readonly [number, number] | null {
+  const bbox = seg.bbox
+  if (!bbox || bbox.length < 4) return null
+  const target = bbox.slice(0, 4) as FormulaBBox
+  const column = columnBox((target[0] + target[2]) / 2)
+  const candidates = inlineMath.value
+    .filter((item) => isDisplayMath(item) && item.bbox && item.bbox.length >= 4)
+    .map((item) => item.bbox!.slice(0, 4) as FormulaBBox)
+  return displayFormulaLane(target, candidates, column)
+}
+
 function isDisplayMath(seg: RichSegment): boolean {
   if (seg.display) return true
   const tex = seg.latex || ''
@@ -448,7 +460,7 @@ function mathBox(seg: RichSegment) {
   const display = isDisplayMath(seg)
   const nb = neighborTextBand(seg)
   if (display) {
-    const [cx0, cx1] = columnBox((b[0] + b[2]) / 2)
+    const [cx0, cx1] = displayLaneBox(seg) || columnBox((b[0] + b[2]) / 2)
     const keep = 1
     const padTop = Math.min(3, Math.max(0, (b[1] - nb.displayPrev - keep) * 0.45))
     const padBot = Math.min(3, Math.max(0, (nb.displayNext - b[3] - keep) * 0.45))

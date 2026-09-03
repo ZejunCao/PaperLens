@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -31,6 +31,11 @@ class Paper(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     parse_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
     parse_progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    folder_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("folders.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

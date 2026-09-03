@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 import { AlertCircle, ArrowLeft, Languages, Loader2, Minus, Plus, RotateCcw } from 'lucide-vue-next'
 import SplitDocumentView from '@/components/reader/SplitDocumentView.vue'
 import ReaderRightRail from '@/components/reader/ReaderRightRail.vue'
+import { markPaperOpened } from '@/api/papers'
 import { usePapersStore } from '@/stores/papers'
 import { useUiStore } from '@/stores/ui'
 import type { Paper } from '@/types'
@@ -91,6 +92,7 @@ onMounted(async () => {
   error.value = ''
   try {
     const p = await store.getOne(props.id)
+    void markPaperOpened(props.id).catch(() => undefined)
     paperStatus.value = p.status
     if (p.page_count) pageCount.value = p.page_count
   } catch (e) {

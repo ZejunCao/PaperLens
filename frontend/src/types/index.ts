@@ -20,6 +20,9 @@ export interface Paper {
   error_message: string | null
   parse_stage?: string | null
   parse_progress?: number | null
+  folder_id: string | null
+  deleted_at: string | null
+  last_opened_at: string | null
   created_at: string
   updated_at: string
 }
@@ -27,6 +30,30 @@ export interface Paper {
 export interface PaperListResponse {
   items: Paper[]
   total: number
+}
+
+export interface Folder {
+  id: string
+  name: string
+  parent_id: string | null
+  sort_order: number
+  paper_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface FolderListResponse {
+  items: Folder[]
+}
+
+export type LibraryView = 'all' | 'unfiled' | 'processing' | 'recent' | 'trash'
+export type PaperSort = 'updated' | 'created' | 'title' | 'opened'
+
+export interface PaperQuery {
+  folderId?: string | null
+  view?: LibraryView
+  query?: string
+  sort?: PaperSort
 }
 
 export const STATUS_LABEL: Record<PaperStatus, string> = {

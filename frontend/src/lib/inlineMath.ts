@@ -7,14 +7,6 @@ function pushText(out: RichChunk[], text: string) {
   else out.push({ kind: 'text', text })
 }
 
-function unwrapDelimited(tok: string): { latex: string; display: boolean } {
-  if (tok.startsWith('$$') && tok.endsWith('$$')) return { latex: tok.slice(2, -2), display: true }
-  if (tok.startsWith('$') && tok.endsWith('$')) return { latex: tok.slice(1, -1), display: false }
-  if (tok.startsWith('\\[') && tok.endsWith('\\]')) return { latex: tok.slice(2, -2), display: true }
-  if (tok.startsWith('\\(') && tok.endsWith('\\)')) return { latex: tok.slice(2, -2), display: false }
-  return { latex: tok, display: false }
-}
-
 function isAsciiLetter(ch: string): boolean {
   return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
 }
@@ -42,6 +34,21 @@ function matchBalancedBrace(s: string, open: number): number {
   return -1
 }
 
+/** 压缩普通数学原子间空格，但保留 `\\leq j` 这类控制词的参数边界。 */
+function compactAdjacentMathAtoms(s: string): string {
+  return s.replace(
+    /([A-Za-z0-9}\])])\s+(?!\\[A-Za-z*])([A-Za-z0-9{(^_])/g,
+    (_match, left: string, right: string, offset: number, source: string) => {
+      if (isAsciiLetter(left)) {
+        let commandStart = offset
+        while (commandStart > 0 && isAsciiLetter(source[commandStart - 1]!)) commandStart--
+        if (commandStart > 0 && source[commandStart - 1] === '\\') return `${left} ${right}`
+      }
+      return `${left}${right}`
+    },
+  )
+}
+
 /** MinerU/译文：把带空格的 LaTeX 压成 KaTeX 可渲染形式 */
 export function normalizeSpacedLatex(raw: string): string {
   let s = raw.replace(/\s+/g, ' ').trim()
@@ -52,9 +59,30 @@ export function normalizeSpacedLatex(raw: string): string {
   // N × F：必须保留边界，否则 KaTeX 会把 N\times 里的 \t 当成 tab 转义
   s = s.replace(/([0-9A-Za-z])\s*\\times\s*([0-9A-Za-z])/g, '$1{\\times}$2')
 
-  // `\ bar` -> `\bar`；JSON 里 \\times 解析后就是一个反斜杠，不是双反斜杠
-  s = s.replace(/\\ +([A-Za-z]+)/g, '\\$1')
+  // `\ bar` -> `\bar`；但 `\ j` / `\ v` 是 MinerU 多写的转义空格，
+  // 单字母不能拼成不存在或语义不同的控制词（如 `\j`、重音命令 `\v`）。
+  s = s.replace(/\\ +([A-Za-z]+)/g, (_match, word: string) =>
+    word.length === 1 ? word : `\\${word}`,
+  )
   s = s.replace(/\\{2,}(?=[A-Za-z*])/g, '\\')
+  // 将旧式字体声明统一成有明确参数的 KaTeX 命令，避免 `\bf Q` 被误拼成
+  // `\bfQ`，也兼容 KaTeX 不支持的 `\em`。
+  const legacyFontCommands: Record<string, string> = {
+    bf: 'mathbf',
+    rm: 'mathrm',
+    it: 'mathit',
+    em: 'mathit',
+  }
+  s = s.replace(
+    /\\(bf|rm|it|em)(?=\s*(?:\{|[A-Za-z0-9]))/g,
+    (_match, command: string) => `\\${legacyFontCommands[command]}`,
+  )
+  // MinerU 偶尔省略单字符参数的花括号，如 `\pmb q`。若直接压缩空格会
+  // 变成不存在的 `\pmbq` 命令，KaTeX 会将其显示为红色错误文本。
+  s = s.replace(
+    /\\(pmb|boldsymbol|mathbf|mathrm|mathit|mathsf|mathtt|mathcal|mathbb|mathfrak|bar|hat|tilde|vec)\s+([A-Za-z0-9])/g,
+    '\\$1{$2}',
+  )
 
   for (let pass = 0; pass < 16; pass++) {
     const prev = s
@@ -71,7 +99,9 @@ export function normalizeSpacedLatex(raw: string): string {
         if (s[j] === '{') {
           const close = matchBalancedBrace(s, j)
           if (close > j) {
-            const body = normalizeSpacedLatex(s.slice(j + 1, close)).replace(/\s+/g, '')
+            // 组内仍可能有必须保留的控制词边界（如 `\\dot{{\\bf Q}}` 中的
+            // `\\bf Q`）；不能在递归规范化后再无条件删除全部空格。
+            const body = normalizeSpacedLatex(s.slice(j + 1, close))
             out += `${s.slice(i, j)}${star}{${body}}`
             i = close + 1
             continue
@@ -85,7 +115,7 @@ export function normalizeSpacedLatex(raw: string): string {
         if (s[j] === '{') {
           const close = matchBalancedBrace(s, j)
           if (close > j) {
-            const body = normalizeSpacedLatex(s.slice(j + 1, close)).replace(/\s+/g, '')
+            const body = normalizeSpacedLatex(s.slice(j + 1, close))
             out += `${s[i]}{${body}}`
             i = close + 1
             continue
@@ -105,14 +135,15 @@ export function normalizeSpacedLatex(raw: string): string {
       .replace(/\s*,\s*/g, ',')
       .replace(/\s*\.\s*(?=[}\s]|$)/g, '.')
       .replace(/\s*=\s*/g, '=')
-      .replace(/\s*\\in\s*/g, '\\in ')
-      .replace(/\s*\\doteq\s*/g, '\\doteq ')
-      .replace(/\s*\\times\s*/g, '\\times ')
-      .replace(/\s*\\cdot\s*/g, '\\cdot ')
+      // 控制词必须按完整单词匹配；否则会把 `\intercal` 拆成 `\in tercal`。
+      .replace(/\s*\\in(?![A-Za-z])\s*/g, '\\in ')
+      .replace(/\s*\\doteq(?![A-Za-z])\s*/g, '\\doteq ')
+      .replace(/\s*\\times(?![A-Za-z])\s*/g, '\\times ')
+      .replace(/\s*\\cdot(?![A-Za-z])\s*/g, '\\cdot ')
       .replace(/\{\s+/g, '{')
       .replace(/\s+\}/g, '}')
       // 勿把 `N \times` 拆成 `N\` + `times`；也勿把 `\times F` 压成 `\timesF`（\t 转义）
-      .replace(/([A-Za-z0-9}\])])\s+(?!\\[A-Za-z*])([A-Za-z0-9{(^_])/g, '$1$2')
+    s = compactAdjacentMathAtoms(s)
     if (s === prev) break
   }
   s = s.replace(/\\{2,}(?=[A-Za-z*])/g, '\\')
@@ -214,12 +245,33 @@ function scanLatexSpan(s: string, start: number): number {
 function mathSpanStart(s: string, i: number): boolean {
   const ch = s[i]!
   if (ch === '\\') return true
+  // MinerU 常把命令整体包在花括号里：`{ \\pmb{k} }`。从内部反斜杠
+  // 开始会留下一个无配对的 `}`，所以应把外层分组一并交给 KaTeX。
+  if (ch === '{') {
+    let k = i + 1
+    while (s[k] === ' ' || s[k] === '\t' || s[k] === '{') k++
+    return s[k] === '\\'
+  }
   if (isAsciiLetter(ch) || /[0-9]/.test(ch)) {
+    // 不从标识符中间重新起扫；否则 `neco_a_01174` 虽在开头被排除，仍会
+    // 从中间的 `a_01174` 被二次误判为公式。
+    if (i > 0 && /[A-Za-z0-9_]/.test(s[i - 1]!)) return false
     let k = i + 1
     while (k < s.length && k < i + 12) {
       const c = s[k]!
       if (isCnBoundary(c)) return false
-      if (c === '_' || c === '^' || c === '{' || c === '\\') return true
+      if (c === '_') {
+        const identifier = s.slice(i).match(/^[A-Za-z0-9_]+/)?.[0] || ''
+        if ((identifier.match(/_/g) || []).length > 1) return false
+        let suffix = k + 1
+        while (s[suffix] === ' ' || s[suffix] === '\t') suffix++
+        if (s[suffix] === '{') return true
+        let suffixEnd = suffix
+        while (suffixEnd < s.length && isAsciiLetter(s[suffixEnd]!)) suffixEnd++
+        // `x_i` 是公式，`x_rolled` / `openai_compatible` 是普通标识符。
+        return suffixEnd - suffix <= 1
+      }
+      if (c === '^' || c === '{' || c === '\\') return true
       if (c !== ' ' && c !== '\t' && c !== '(') return false
       k++
     }
@@ -258,24 +310,80 @@ function splitMixedTextMath(s: string, out: RichChunk[]) {
   }
 }
 
+type DelimitedMath = { start: number; end: number; latex: string; display: boolean }
+
+/**
+ * 找到下一个显式公式定界符。
+ *
+ * 这里不能用 `\\begin...\\end` 的非贪婪正则：同名环境可以嵌套，例如 MinerU
+ * 常用外层 array 包住一个列向量 array，正则会在内层的 `\\end{array}` 提前结束。
+ */
+function findDelimitedMath(s: string, from: number): DelimitedMath | null {
+  const opener = /\\begin\{([a-zA-Z*]+)\}|\$\$|\$|\\\[|\\\(/g
+  opener.lastIndex = from
+
+  let m: RegExpExecArray | null
+  while ((m = opener.exec(s))) {
+    const start = m.index
+    const token = m[0]
+
+    if (token.startsWith('\\begin')) {
+      const stack = [m[1]!]
+      const environment = /\\(begin|end)\{([a-zA-Z*]+)\}/g
+      environment.lastIndex = opener.lastIndex
+      let env: RegExpExecArray | null
+      while ((env = environment.exec(s))) {
+        const [, action, name] = env
+        if (action === 'begin') {
+          stack.push(name!)
+        } else if (stack[stack.length - 1] === name) {
+          stack.pop()
+          if (!stack.length) {
+            return {
+              start,
+              end: environment.lastIndex,
+              latex: s.slice(start, environment.lastIndex),
+              display: false,
+            }
+          }
+        }
+      }
+      // 环境未闭合时继续寻找后面的其他合法定界公式。
+      opener.lastIndex = start + token.length
+      continue
+    }
+
+    const closeToken = token === '$$' ? '$$' : token === '$' ? '$' : token === '\\[' ? '\\]' : '\\)'
+    const close = s.indexOf(closeToken, opener.lastIndex)
+    if (close < 0 || (token === '$' && s.slice(opener.lastIndex, close).includes('\n'))) {
+      opener.lastIndex = start + token.length
+      continue
+    }
+    const end = close + closeToken.length
+    return {
+      start,
+      end,
+      latex: s.slice(opener.lastIndex, close),
+      display: token === '$$' || token === '\\[',
+    }
+  }
+  return null
+}
+
 /** 把 $...$、\\(...\\) 以及 MinerU/译文里无定界符的公式切成文本/公式块 */
 export function splitInlineMath(raw: string): RichChunk[] {
   if (!raw) return []
-  const delim =
-    /\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\1\}|\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)/g
   const out: RichChunk[] = []
   let last = 0
-  let m: RegExpExecArray | null
-  while ((m = delim.exec(raw))) {
-    if (m.index > last) splitMixedTextMath(raw.slice(last, m.index), out)
-    const tok = m[0]
-    if (tok.startsWith('\\begin')) {
-      out.push({ kind: 'math', text: normalizeSpacedLatex(tok), display: true })
-    } else {
-      const u = unwrapDelimited(tok)
-      out.push({ kind: 'math', text: normalizeSpacedLatex(u.latex.trim()), display: u.display })
-    }
-    last = m.index + tok.length
+  let delimited: DelimitedMath | null
+  while ((delimited = findDelimitedMath(raw, last))) {
+    if (delimited.start > last) splitMixedTextMath(raw.slice(last, delimited.start), out)
+    out.push({
+      kind: 'math',
+      text: normalizeSpacedLatex(delimited.latex.trim()),
+      display: delimited.display,
+    })
+    last = delimited.end
   }
   if (last < raw.length) splitMixedTextMath(raw.slice(last), out)
   return mergeAdjacentMath(out).filter((c) => c.text !== '')

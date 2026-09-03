@@ -4,9 +4,9 @@ import { AlertCircle, Loader2, RefreshCw } from 'lucide-vue-next'
 import WheelGestures, { type WheelEventState } from 'wheel-gestures'
 import LayoutPage from '@/components/reader/LayoutPage.vue'
 import KatexView from '@/components/reader/KatexView.vue'
-import { fetchDocument, fetchPaper, paperAssetUrl, retryParse } from '@/api/papers'
+import { fetchDocumentChunk, fetchPaper, paperAssetUrl, retryParse } from '@/api/papers'
 import { fetchTranslations, translatePaperPage } from '@/api/settings'
-import type { ContentBlock, DocumentModel, Sentence } from '@/types/document'
+import type { ContentBlock, DocumentChunk, DocumentModel, PageLayout, Sentence } from '@/types/document'
 import type { PageTranslation } from '@/types/translation'
 import type { Paper } from '@/types'
 import { STATUS_LABEL, parseStageLabel } from '@/types'
@@ -36,10 +36,12 @@ const emit = defineEmits<{
 
 const PAGE_GAP = 12
 const LEFT_PAD = 4
+const DOCUMENT_PAGE_BATCH = 8
 const scrollRef = ref<HTMLDivElement | null>(null)
 const fitScale = ref(1)
 const paper = ref<Paper | null>(null)
 const documentModel = ref<DocumentModel | null>(null)
+const loadedPages = ref<Set<number>>(new Set())
 const loading = ref(true)
 const error = ref('')
 const retrying = ref(false)
@@ -56,6 +58,8 @@ let hoverClearTimer: ReturnType<typeof setTimeout> | null = null
 let hoveredSentenceId: string | null = null
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let documentLoadAbort: AbortController | null = null
+const requestedDocumentPages = new Set<number>()
 let dwellTimer: ReturnType<typeof setTimeout> | null = null
 /** 仅卸载时 abort；换页/全文队列不取消进行中的请求 */
 let translateAbort: AbortController | null = null
@@ -146,13 +150,103 @@ async function refreshPaper() {
   if (paper.value.page_count) emit('page-count', paper.value.page_count)
 }
 
+function pageIsLoaded(pageNo: number): boolean {
+  return loadedPages.value.has(pageNo)
+}
+
+function mergeDocumentChunk(chunk: DocumentChunk) {
+  const doc = documentModel.value
+  if (!doc || !chunk.pages.length) return
+  const incoming = new Map(chunk.pages.map((page) => [page.page, page]))
+  documentModel.value = {
+    ...doc,
+    pages: doc.pages.map((page) => incoming.get(page.page) || page),
+  }
+  const nextLoaded = new Set(loadedPages.value)
+  for (const page of chunk.pages) nextLoaded.add(page.page)
+  loadedPages.value = nextLoaded
+}
+
+async function loadDocumentPage(pageNo: number) {
+  const controller = documentLoadAbort
+  if (!controller || controller.signal.aborted || pageIsLoaded(pageNo)) return
+  if (requestedDocumentPages.has(pageNo)) return
+  requestedDocumentPages.add(pageNo)
+  try {
+    const chunk = await fetchDocumentChunk(props.paperId, pageNo, 1, {
+      signal: controller.signal,
+    })
+    if (documentLoadAbort === controller && !controller.signal.aborted) mergeDocumentChunk(chunk)
+  } catch (e) {
+    if (!(e instanceof DOMException && e.name === 'AbortError')) {
+      console.warn(`加载文档第 ${pageNo} 页失败`, e)
+    }
+  } finally {
+    requestedDocumentPages.delete(pageNo)
+  }
+}
+
+async function loadRemainingDocumentPages(controller: AbortController, pageCount: number) {
+  for (let start = 2; start <= pageCount; start += DOCUMENT_PAGE_BATCH) {
+    if (controller.signal.aborted || documentLoadAbort !== controller) return
+    const end = Math.min(pageCount, start + DOCUMENT_PAGE_BATCH - 1)
+    const alreadyLoaded = Array.from(
+      { length: end - start + 1 },
+      (_, index) => start + index,
+    ).every(pageIsLoaded)
+    if (alreadyLoaded) continue
+    try {
+      const chunk = await fetchDocumentChunk(props.paperId, start, DOCUMENT_PAGE_BATCH, {
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted || documentLoadAbort !== controller) return
+      mergeDocumentChunk(chunk)
+      // 把渲染机会让给浏览器，避免后台补页连续占满主线程。
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return
+      console.warn(`后台加载文档第 ${start}-${end} 页失败`, e)
+    }
+  }
+}
+
+function stopDocumentLoading() {
+  documentLoadAbort?.abort()
+  documentLoadAbort = null
+  requestedDocumentPages.clear()
+}
+
 async function loadDocumentIfReady() {
+  stopDocumentLoading()
+  loadedPages.value = new Set()
   if (!paper.value || paper.value.status !== 'ready') {
     documentModel.value = null
     return
   }
-  documentModel.value = await fetchDocument(props.paperId)
-  emit('page-count', documentModel.value.page_count)
+  const controller = new AbortController()
+  documentLoadAbort = controller
+  const first = await fetchDocumentChunk(props.paperId, 1, 1, {
+    includeManifest: true,
+    signal: controller.signal,
+  })
+  if (controller.signal.aborted || documentLoadAbort !== controller) return
+
+  const firstPages = new Map(first.pages.map((page) => [page.page, page]))
+  const placeholders: PageLayout[] = (first.page_manifest || []).map((page) =>
+    firstPages.get(page.page) || { ...page, blocks: [], images: [] },
+  )
+  documentModel.value = {
+    paper_id: first.paper_id,
+    parser: first.parser,
+    parser_version: first.parser_version,
+    page_count: first.page_count,
+    title: first.title,
+    pages: placeholders.length ? placeholders : first.pages,
+    toc: first.toc || [],
+    blocks: [],
+  }
+  loadedPages.value = new Set(first.pages.map((page) => page.page))
+  emit('page-count', first.page_count)
   await nextTick()
   updateFitScale()
   if (resizeObserver && scrollRef.value) {
@@ -160,6 +254,7 @@ async function loadDocumentIfReady() {
   }
   updateCurrentPageFromScroll()
   void loadTranslations().then(() => scheduleTranslate(currentPage.value))
+  void loadRemainingDocumentPages(controller, first.page_count)
 }
 
 async function bootstrap() {
@@ -177,6 +272,7 @@ async function bootstrap() {
       startPolling()
     }
   } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') return
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
     loading.value = false
@@ -184,6 +280,7 @@ async function bootstrap() {
 }
 
 async function onRetry() {
+  stopDocumentLoading()
   retrying.value = true
   error.value = ''
   try {
@@ -241,6 +338,7 @@ function updateCurrentPageFromScroll() {
   emit('update:page', page)
   if (currentPage.value !== page) {
     currentPage.value = page
+    if (!pageIsLoaded(page)) void loadDocumentPage(page)
     scheduleTranslate(page)
   }
 }
@@ -536,6 +634,7 @@ function scrollToPage(page: number) {
   el.scrollTo({ top, behavior: 'auto' })
   emit('update:page', target)
   currentPage.value = target
+  if (!pageIsLoaded(target)) void loadDocumentPage(target)
   scheduleTranslate(target)
 }
 
@@ -886,6 +985,8 @@ const pinnedSentenceText = computed(() => {
   return pinned.fallback
 })
 
+const pinnedSentenceChunks = computed(() => splitInlineMath(pinnedSentenceText.value))
+
 type SentencePart = {
   id: string
   gap: string
@@ -1089,6 +1190,7 @@ watch(
 watch(
   () => props.paperId,
   () => {
+    stopDocumentLoading()
     stopTranslate()
     clearPinnedSentence()
     translationPages.value = {}
@@ -1130,6 +1232,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  stopDocumentLoading()
   stopPolling()
   stopTranslate()
   stopPan()
@@ -1253,9 +1356,18 @@ defineExpose({
               ×
             </button>
           </div>
-          <p class="m-0 leading-relaxed text-foreground" :style="{ fontSize: `${fontPx}px` }">
-            {{ pinnedSentenceText }}
-          </p>
+          <div class="m-0 leading-relaxed text-foreground" :style="{ fontSize: `${fontPx}px` }">
+            <template v-for="(chunk, index) in pinnedSentenceChunks" :key="`pinned-${index}`">
+              <KatexView
+                v-if="chunk.kind === 'math'"
+                class="mx-0.5"
+                :latex="chunk.text"
+                :display="!!chunk.display"
+                :title="chunk.text"
+              />
+              <span v-else>{{ chunk.text }}</span>
+            </template>
+          </div>
         </div>
       </div>
       <div class="w-full py-3">
@@ -1288,11 +1400,18 @@ defineExpose({
               }"
             >
               <LayoutPage
+                v-if="pageIsLoaded(page.page)"
                 :paper-id="paperId"
                 :page="page"
                 :scale="renderScale"
                 @hover-sentence="setHoveredSentence"
               />
+              <div
+                v-else
+                class="absolute inset-0 flex items-start justify-center pt-10 text-xs text-muted-foreground/60"
+              >
+                第 {{ page.page }} 页加载中…
+              </div>
               <div
                 class="pointer-events-none absolute right-2 top-2 rounded bg-black/40 px-1.5 py-0.5 text-[10px] text-white"
               >
@@ -1307,7 +1426,7 @@ defineExpose({
             <div class="flex h-full w-full flex-col overflow-hidden bg-white shadow-sm ring-1 ring-black/5">
               <div data-right-pane class="group/right relative h-full overflow-clip">
                 <div
-                  v-if="llmConfigured"
+                  v-if="llmConfigured && pageIsLoaded(page.page)"
                   class="absolute right-2 top-2 z-10 flex items-center gap-1"
                 >
                   <span
@@ -1340,10 +1459,17 @@ defineExpose({
                 </div>
                 <div
                   data-right-content
-                  class="absolute left-0 right-0 top-0 px-4 py-3"
+                  class="absolute left-0 right-0 top-0 px-4 pb-3"
+                  :class="llmConfigured && pageIsLoaded(page.page) ? 'pt-11' : 'pt-3'"
                   :style="{ transform: `translate3d(0, ${-(rightOffsets[page.page] || 0)}px, 0)` }"
                 >
-                <template v-if="rightPaneItems(page.page).length">
+                <p
+                  v-if="!pageIsLoaded(page.page)"
+                  class="text-center text-xs text-muted-foreground/60"
+                >
+                  翻译页加载中…
+                </p>
+                <template v-else-if="rightPaneItems(page.page).length">
                   <template v-for="item in rightPaneItems(page.page)" :key="item.id">
                     <div
                       v-if="item.kind === 'figure-group'"
@@ -1376,8 +1502,15 @@ defineExpose({
                       </template>
                     </div>
                     <template v-else v-for="block in [item.block]" :key="block.id">
+                    <img
+                      v-if="block.type === 'table' && figureSrc(block)"
+                      :src="figureSrc(block)!"
+                      :alt="`table-${block.id}`"
+                      class="mx-auto mb-5 max-w-full rounded-sm border border-border/40 bg-white object-contain"
+                      draggable="false"
+                    />
                     <div
-                      v-if="block.type === 'formula' && block.segments?.length"
+                      v-else-if="block.type === 'formula' && block.segments?.length"
                       class="relative mb-5 px-8 text-foreground/90"
                       :class="blockTextAlign(block, page.width)"
                       :data-sentence-id="block.sentences?.[0]?.id || `block:${block.id}`"

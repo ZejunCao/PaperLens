@@ -95,3 +95,20 @@ export interface DocumentModel {
   toc: TocItem[]
   blocks: ContentBlock[]
 }
+
+export interface PageManifestItem {
+  page: number
+  width: number
+  height: number
+}
+
+export interface DocumentChunk {
+  paper_id: string
+  parser: string
+  parser_version: string
+  page_count: number
+  title?: string | null
+  pages: PageLayout[]
+  toc?: TocItem[]
+  page_manifest?: PageManifestItem[]
+}

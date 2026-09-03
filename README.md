@@ -55,7 +55,7 @@ chmod +x start_all.sh
 
 ### Milestone 0
 
-- PDF 上传 / 论文库 / 重命名 / 删除
+- PDF 与 arXiv 紧凑导入 / 多级文件夹文献库 / 搜索排序 / 回收站
 
 ### Milestone 1
 

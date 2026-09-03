@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     mineru_device: str = "cuda"
     mineru_lang: str = "en"
     mineru_model_source: str = "modelscope"
+    # 0 表示按 MinerU 后端自动估算；可按实际模型/批量覆盖。
+    mineru_gpu_memory_gb: float = 0.0
     mineru_api_token: str = ""
     mineru_api_base: str = "https://mineru.net"
     mineru_api_model: str = "vlm"

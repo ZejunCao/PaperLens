@@ -127,7 +127,8 @@ def test_upload_list_rename_delete(client):
         "/api/papers",
         files={"file": ("demo2.pdf", pdf, "application/pdf")},
     )
-    assert dup.status_code == 409
+    assert dup.status_code == 201
+    assert dup.json()["id"] == paper_id
 
     listed = c.get("/api/papers")
     assert listed.status_code == 200
@@ -144,6 +145,68 @@ def test_upload_list_rename_delete(client):
     deleted = c.delete(f"/api/papers/{paper_id}")
     assert deleted.status_code == 204
     assert c.get("/api/papers").json()["total"] == 0
+
+
+def test_hierarchical_folders_and_single_folder_move(client):
+    c, _ = client
+    root = c.post("/api/folders", json={"name": "研究方向", "parent_id": None})
+    assert root.status_code == 201, root.text
+    root_id = root.json()["id"]
+    child = c.post("/api/folders", json={"name": "线性注意力", "parent_id": root_id})
+    assert child.status_code == 201, child.text
+    child_id = child.json()["id"]
+
+    duplicate = c.post("/api/folders", json={"name": "研究方向", "parent_id": None})
+    assert duplicate.status_code == 409
+    cycle = c.patch(f"/api/folders/{root_id}", json={"parent_id": child_id})
+    assert cycle.status_code == 409
+
+    uploaded = c.post(
+        "/api/papers",
+        data={"folder_id": root_id},
+        files={"file": ("folder-demo.pdf", _minimal_pdf(), "application/pdf")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    paper_id = uploaded.json()["id"]
+    assert uploaded.json()["folder_id"] == root_id
+
+    moved = c.patch(f"/api/papers/{paper_id}", json={"folder_id": child_id})
+    assert moved.status_code == 200
+    assert moved.json()["folder_id"] == child_id
+    assert c.get("/api/papers", params={"folder_id": root_id}).json()["total"] == 0
+    assert c.get("/api/papers", params={"folder_id": child_id}).json()["total"] == 1
+
+    deleted_root = c.delete(f"/api/folders/{root_id}")
+    assert deleted_root.status_code == 204
+    folder_rows = c.get("/api/folders").json()["items"]
+    assert folder_rows[0]["id"] == child_id
+    assert folder_rows[0]["parent_id"] is None
+    assert c.get(f"/api/papers/{paper_id}").json()["folder_id"] == child_id
+
+    assert c.delete(f"/api/folders/{child_id}").status_code == 204
+    assert c.get("/api/papers", params={"view": "unfiled"}).json()["total"] == 1
+
+
+def test_paper_trash_restore_and_permanent_delete(client):
+    c, _ = client
+    uploaded = c.post(
+        "/api/papers",
+        files={"file": ("trash-demo.pdf", _minimal_pdf(), "application/pdf")},
+    )
+    paper_id = uploaded.json()["id"]
+
+    assert c.delete(f"/api/papers/{paper_id}").status_code == 204
+    assert c.get("/api/papers").json()["total"] == 0
+    assert c.get("/api/papers", params={"view": "trash"}).json()["total"] == 1
+    assert c.get(f"/api/papers/{paper_id}").status_code == 404
+
+    restored = c.post(f"/api/papers/{paper_id}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["deleted_at"] is None
+
+    assert c.delete(f"/api/papers/{paper_id}").status_code == 204
+    assert c.delete(f"/api/papers/{paper_id}/permanent").status_code == 204
+    assert c.get("/api/papers", params={"view": "trash"}).json()["total"] == 0
 
 
 def test_reject_non_pdf(client):
