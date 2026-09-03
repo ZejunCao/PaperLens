@@ -56,6 +56,7 @@ chmod +x start_all.sh
 ### Milestone 0
 
 - PDF 与 arXiv 紧凑导入 / 多级文件夹文献库 / 搜索排序 / 回收站
+- 论文详情侧栏；从 arXiv 官方信息或 PDF 内嵌属性提取作者、机构、摘要、DOI 与发表信息
 
 ### Milestone 1
 
@@ -64,6 +65,7 @@ chmod +x start_all.sh
 - 左侧按 bbox 网页复现原 PDF 排版（分栏、行内/行间公式、插图）
 - 右侧按页展示阅读文本；版式层支持按栏选择与复制
 - 失败可重试：`POST /api/papers/{id}/parse`
+- 阅读器布局几何与公式回归测试；GitHub Actions 自动执行前后端测试和正式构建
 
 ## 仓库里有什么、没有什么
 

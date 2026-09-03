@@ -5,15 +5,17 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import or_, select
+from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.models.folder import Folder
 from app.models.paper import Paper, PaperStatus
-from app.services.arxiv import download_arxiv_pdf, normalize_arxiv_id
+from app.services.arxiv import download_arxiv_pdf, fetch_arxiv_metadata, normalize_arxiv_id
+from app.services.metadata import extract_pdf_metadata
 
 PDF_MAGIC = b"%PDF"
 SAFE_FILENAME_RE = re.compile(r"[^\w.\-()+\[\]\u4e00-\u9fff ]+", re.UNICODE)
@@ -53,7 +55,11 @@ def _validate_folder(db: Session, folder_id: str | None) -> None:
 
 
 def create_paper_from_bytes(
-    db: Session, data: bytes, original_filename: str, folder_id: str | None = None
+    db: Session,
+    data: bytes,
+    original_filename: str,
+    folder_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Paper:
     """落盘 PDF、去重、入库并入队解析。"""
     settings = get_settings()
@@ -74,6 +80,9 @@ def create_paper_from_bytes(
         if folder_id is not None:
             existing.folder_id = folder_id
         existing.deleted_at = None
+        for field, value in (metadata or {}).items():
+            if hasattr(existing, field) and value not in (None, "", []):
+                setattr(existing, field, value)
         db.commit()
         db.refresh(existing)
         return existing
@@ -85,10 +94,21 @@ def create_paper_from_bytes(
 
     filename = sanitize_filename(original_filename)
     title = Path(filename).stem
+    values = metadata or {}
     paper = Paper(
         id=paper_id,
         filename=filename,
-        title=title,
+        title=values.get("title") or title,
+        authors=values.get("authors") or [],
+        institutions=values.get("institutions") or [],
+        abstract=values.get("abstract"),
+        publication=values.get("publication"),
+        published_at=values.get("published_at"),
+        doi=values.get("doi"),
+        arxiv_id=values.get("arxiv_id"),
+        source_url=values.get("source_url"),
+        keywords=values.get("keywords") or [],
+        metadata_source=values.get("metadata_source"),
         storage_name=storage_name,
         content_hash=content_hash,
         page_count=estimate_page_count(data),
@@ -116,7 +136,9 @@ async def create_paper_from_upload(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅支持 PDF 文件")
 
     data = await upload.read()
-    return create_paper_from_bytes(db, data, original, folder_id)
+    return create_paper_from_bytes(
+        db, data, original, folder_id, metadata=extract_pdf_metadata(data)
+    )
 
 
 def create_paper_from_arxiv(
@@ -126,8 +148,12 @@ def create_paper_from_arxiv(
     settings = get_settings()
     arxiv_id = normalize_arxiv_id(url_or_id)
     data = download_arxiv_pdf(arxiv_id, max_bytes=settings.max_upload_bytes)
+    metadata = extract_pdf_metadata(data)
+    metadata.update(fetch_arxiv_metadata(arxiv_id))
     safe_id = arxiv_id.replace("/", "_")
-    return create_paper_from_bytes(db, data, f"arxiv-{safe_id}.pdf", folder_id)
+    return create_paper_from_bytes(
+        db, data, f"arxiv-{safe_id}.pdf", folder_id, metadata=metadata
+    )
 
 
 def list_papers(
@@ -155,7 +181,19 @@ def list_papers(
     term = query.strip()
     if term:
         pattern = f"%{term}%"
-        stmt = stmt.where(or_(Paper.title.ilike(pattern), Paper.filename.ilike(pattern)))
+        stmt = stmt.where(
+            or_(
+                Paper.title.ilike(pattern),
+                Paper.filename.ilike(pattern),
+                Paper.abstract.ilike(pattern),
+                Paper.publication.ilike(pattern),
+                Paper.doi.ilike(pattern),
+                Paper.arxiv_id.ilike(pattern),
+                cast(Paper.authors, String).ilike(pattern),
+                cast(Paper.institutions, String).ilike(pattern),
+                cast(Paper.keywords, String).ilike(pattern),
+            )
+        )
     order = {
         "created": Paper.created_at.desc(),
         "title": Paper.title.asc(),
@@ -221,6 +259,29 @@ def restore_paper(db: Session, paper_id: str) -> Paper:
 def mark_opened(db: Session, paper_id: str) -> Paper:
     paper = get_paper(db, paper_id)
     paper.last_opened_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(paper)
+    return paper
+
+
+def refresh_paper_metadata(db: Session, paper_id: str) -> Paper:
+    paper = get_paper(db, paper_id)
+    path = paper_file_path(paper)
+    if not path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PDF 文件缺失")
+
+    metadata = extract_pdf_metadata(path.read_bytes())
+    arxiv_id = paper.arxiv_id
+    if not arxiv_id:
+        match = re.fullmatch(r"arxiv-(.+)\.pdf", paper.filename, re.IGNORECASE)
+        if match:
+            arxiv_id = match.group(1)
+    if arxiv_id:
+        metadata.update(fetch_arxiv_metadata(arxiv_id))
+
+    for field, value in metadata.items():
+        if hasattr(paper, field) and value not in (None, "", []):
+            setattr(paper, field, value)
     db.commit()
     db.refresh(paper)
     return paper

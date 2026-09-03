@@ -10,6 +10,31 @@ function verticalOverlapRatio(a: FormulaBBox, b: FormulaBBox): number {
 }
 
 /**
+ * 行间公式旁边仍有同一视觉行的正文时，它实际上是“公式 + 说明”的组合行。
+ * 这种公式必须保留解析得到的 bbox，不能扩展为整栏居中。
+ */
+export function formulaHasAdjacentText(
+  target: FormulaBBox,
+  textBoxes: FormulaBBox[],
+  column: readonly [number, number],
+): boolean {
+  const maxGap = Math.min(80, (column[1] - column[0]) * 0.22)
+  return textBoxes.some((box) => {
+    const centerX = (box[0] + box[2]) / 2
+    if (centerX < column[0] || centerX > column[1]) return false
+    if (verticalOverlapRatio(target, box) < 0.3) return false
+
+    const gap =
+      box[0] >= target[2]
+        ? box[0] - target[2]
+        : target[0] >= box[2]
+          ? target[0] - box[2]
+          : -1
+    return gap >= 0 && gap <= maxGap
+  })
+}
+
+/**
  * 同一视觉行存在多个互不重叠的行间公式时，为目标公式划分独立横向区域。
  * 单公式或 bbox 相互覆盖时返回 null，由调用方沿用整栏居中策略。
  */

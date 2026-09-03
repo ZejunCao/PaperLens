@@ -16,6 +16,7 @@ import {
 import FolderTree from '@/components/library/FolderTree.vue'
 import FolderDialog from '@/components/library/FolderDialog.vue'
 import ImportPaperMenu from '@/components/library/ImportPaperMenu.vue'
+import PaperDetailPanel from '@/components/library/PaperDetailPanel.vue'
 import PaperListRow from '@/components/library/PaperListRow.vue'
 import { useFoldersStore } from '@/stores/folders'
 import { usePapersStore } from '@/stores/papers'
@@ -40,6 +41,8 @@ const selected = ref<Set<string>>(new Set())
 const toast = ref('')
 const folderPanelOpen = ref(false)
 const draggingFile = ref(false)
+const detailPaperId = ref<string | null>(null)
+const refreshingMetadata = ref(false)
 const folderEditor = ref<{
   mode: 'create' | 'rename'
   parentId: string | null
@@ -74,6 +77,7 @@ const currentPath = computed(() => {
 })
 const allSelected = computed(() => papers.items.length > 0 && selected.value.size === papers.items.length)
 const error = computed(() => papers.error || folders.error)
+const detailPaper = computed(() => papers.items.find((paper) => paper.id === detailPaperId.value))
 
 function paperQuery() {
   return {
@@ -104,6 +108,7 @@ function selectView(view: LibraryView) {
   selectedFolderId.value = null
   selectedView.value = view
   folderPanelOpen.value = false
+  detailPaperId.value = null
   syncRoute()
   void loadPapers()
 }
@@ -112,6 +117,7 @@ function selectFolder(id: string) {
   selectedFolderId.value = id
   selectedView.value = 'all'
   folderPanelOpen.value = false
+  detailPaperId.value = null
   syncRoute()
   void loadPapers()
 }
@@ -202,6 +208,24 @@ function openPaper(id: string) {
   void router.push({ name: 'reader', params: { id } })
 }
 
+function inspectPaper(id: string) {
+  detailPaperId.value = id
+  const paper = papers.items.find((item) => item.id === id)
+  if (paper && !paper.metadata_source) void refreshMetadata(id)
+}
+
+async function refreshMetadata(id: string) {
+  refreshingMetadata.value = true
+  try {
+    await papers.refreshMetadata(id)
+    toast.value = '元信息已更新'
+  } catch (e) {
+    papers.error = e instanceof Error ? e.message : String(e)
+  } finally {
+    refreshingMetadata.value = false
+  }
+}
+
 async function renamePaper(id: string) {
   const paper = papers.items.find((item) => item.id === id)
   if (!paper) return
@@ -279,6 +303,7 @@ function closeTransientLayer(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     folderPanelOpen.value = false
     draggingFile.value = false
+    detailPaperId.value = null
   }
 }
 
@@ -316,7 +341,7 @@ onBeforeUnmount(() => {
         </div>
         <label class="ml-auto hidden h-9 w-[min(360px,32vw)] items-center gap-2 rounded-xl border border-border/65 bg-white/45 px-3 sm:flex">
           <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
-          <input v-model="query" class="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground/65" placeholder="搜索标题或文件名" />
+          <input v-model="query" class="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground/65" placeholder="搜索标题、作者或 DOI" />
           <button v-if="query" type="button" class="text-muted-foreground" aria-label="清空搜索" @click="query = ''"><X class="h-3.5 w-3.5" /></button>
         </label>
         <label class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-border/60 bg-white/40 px-2.5 text-[11px] text-muted-foreground">
@@ -340,7 +365,7 @@ onBeforeUnmount(() => {
       </div>
       <p v-if="toast" class="absolute left-1/2 top-3 z-40 -translate-x-1/2 rounded-xl border border-border/60 bg-[#fffdf9] px-3 py-2 text-xs text-muted-foreground shadow-lg">{{ toast }}</p>
 
-      <section class="grid min-h-0 flex-1 grid-cols-1 overflow-hidden bg-white/10 lg:grid-cols-[235px_minmax(0,1fr)]">
+      <section class="grid min-h-0 flex-1 grid-cols-1 overflow-hidden bg-white/10" :class="detailPaper ? 'lg:grid-cols-[235px_minmax(0,1fr)_380px]' : 'lg:grid-cols-[235px_minmax(0,1fr)]'" @click="detailPaperId = null">
         <div class="hidden min-h-0 border-r border-border/50 bg-[#f7f3ec]/35 lg:block">
           <FolderTree
             :tree="folders.tree" :loading="folders.loading" :selected-view="selectedView" :selected-folder-id="selectedFolderId"
@@ -377,15 +402,16 @@ onBeforeUnmount(() => {
             </div>
             <div v-else class="min-w-[820px]">
               <PaperListRow
-                v-for="paper in papers.items" :key="paper.id" :paper="paper" :selected="selected.has(paper.id)"
+                v-for="paper in papers.items" :key="paper.id" :paper="paper" :selected="selected.has(paper.id)" :inspected="detailPaperId === paper.id"
                 :folder-name="paper.folder_id ? folderMap.get(paper.folder_id)?.name : undefined" :trash="selectedView === 'trash'"
-                @select="toggleSelected" @open="openPaper" @rename="renamePaper" @remove="trashPaper"
+                @select="toggleSelected" @inspect="inspectPaper" @open="openPaper" @rename="renamePaper" @remove="trashPaper"
                 @restore="restorePaper" @permanent="permanentPaper" @reparse="reparsePaper"
               />
             </div>
           </div>
-          <p class="mt-2 text-[10px] text-muted-foreground/75">双击打开论文 · 拖动论文到左侧文件夹即可移动</p>
+          <p class="mt-2 text-[10px] text-muted-foreground/75">点击行查看详情 · 点击带下划线的标题打开阅读 · 拖动论文可移动文件夹</p>
         </div>
+        <PaperDetailPanel v-if="detailPaper" class="hidden lg:flex" :paper="detailPaper" :refreshing="refreshingMetadata" @click.stop @close="detailPaperId = null" @open="openPaper" @refresh="refreshMetadata" />
       </section>
     </div>
 
@@ -398,6 +424,10 @@ onBeforeUnmount(() => {
           @rename="renameFolder" @remove="removeFolder" @drop-paper="movePaper"
         />
       </div>
+    </div>
+
+    <div v-if="detailPaper" class="fixed inset-0 z-40 bg-black/20 lg:hidden" @click="detailPaperId = null">
+      <PaperDetailPanel class="absolute inset-y-0 right-0 w-[min(390px,calc(100vw-24px))]" :paper="detailPaper" :refreshing="refreshingMetadata" @click.stop @close="detailPaperId = null" @open="openPaper" @refresh="refreshMetadata" />
     </div>
 
     <div v-if="draggingFile" class="pointer-events-none absolute inset-0 z-50 grid place-items-center border-2 border-dashed border-primary bg-primary/10 backdrop-blur-sm">

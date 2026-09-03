@@ -3,7 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PageLayout, RichSegment, TextSpan } from '@/types/document'
 import { paperAssetUrl } from '@/api/papers'
 import KatexView from '@/components/reader/KatexView.vue'
-import { displayFormulaLane, type FormulaBBox } from '@/lib/formulaLayout'
+import {
+  displayFormulaLane,
+  formulaHasAdjacentText,
+  type FormulaBBox,
+} from '@/lib/formulaLayout'
+import { bboxContainsCenter, detectPageColumns, toBBox } from '@/lib/layoutGeometry'
 import { normalizeSpacedLatex } from '@/lib/inlineMath'
 import { encodeSentRanges, mathUnitKey, pageUnitAlign, pickSentenceIdFromTarget } from '@/lib/sentenceLayout'
 
@@ -66,56 +71,7 @@ const inlineMath = computed(() => {
   return out
 })
 
-const columns = computed(() => {
-  const pageW = props.page.width
-  const mid = pageW / 2
-  let l0 = Infinity
-  let l1 = 0
-  let r0 = Infinity
-  let r1 = 0
-  for (const b of props.page.blocks) {
-    const [x0, , x1] = b.bbox
-    const w = x1 - x0
-    // 过宽通栏、公式贴图都不参与双栏聚类，避免单栏论文被拆开、公式盒收成自身宽度
-    if (b.type === 'formula') continue
-    if (w < 70 || w > pageW * 0.62) continue
-    const cx = (x0 + x1) / 2
-    if (cx < mid) {
-      l0 = Math.min(l0, x0)
-      l1 = Math.max(l1, x1)
-    } else {
-      r0 = Math.min(r0, x0)
-      r1 = Math.max(r1, x1)
-    }
-  }
-  const gap = r0 - l1
-  if (
-    Number.isFinite(l0) &&
-    Number.isFinite(r0) &&
-    l1 - l0 > 90 &&
-    r1 - r0 > 90 &&
-    gap > 10 &&
-    l1 < pageW * 0.55 &&
-    r0 > pageW * 0.45
-  ) {
-    return { two: true, left: [l0, l1] as const, right: [r0, r1] as const }
-  }
-  let s0 = Infinity
-  let s1 = 0
-  for (const b of props.page.blocks) {
-    const [x0, , x1] = b.bbox
-    const w = x1 - x0
-    if (b.type === 'formula' || b.type === 'figure') continue
-    if (w < pageW * 0.4 || w > pageW * 0.96) continue
-    s0 = Math.min(s0, x0)
-    s1 = Math.max(s1, x1)
-  }
-  if (!Number.isFinite(s0) || s1 - s0 < pageW * 0.35) {
-    s0 = pageW * 0.1
-    s1 = pageW * 0.9
-  }
-  return { two: false, left: [s0, s1] as const, right: [s0, s1] as const }
-})
+const columns = computed(() => detectPageColumns(props.page.blocks, props.page.width))
 
 function itemColumn(x: number): 0 | 1 {
   const c = columns.value
@@ -145,15 +101,8 @@ function spanCoveredByInlineMath(span: TextSpan): boolean {
   return false
 }
 
-function spanWithinBlock(span: TextSpan, blockBbox: number[]): boolean {
-  if (!span.bbox || span.bbox.length < 4 || blockBbox.length < 4) return true
-  const [bx0, by0, bx1, by1] = blockBbox
-  const [sx0, sy0, sx1, sy1] = span.bbox
-  const cx = (sx0 + sx1) / 2
-  const cy = (sy0 + sy1) / 2
-  const tolY = 10
-  const tolX = 24
-  return cx >= bx0 - tolX && cx <= bx1 + tolX && cy >= by0 - tolY && cy <= by1 + tolY
+function spanWithinBlock(span: TextSpan, blockBbox: TextSpan['bbox']): boolean {
+  return bboxContainsCenter(blockBbox, span.bbox)
 }
 
 /** 正文 + 行内公式按阅读顺序排进同一 DOM 流，框选才接近所见即所得 */
@@ -380,12 +329,27 @@ function columnBox(x: number): readonly [number, number] {
 function displayLaneBox(seg: RichSegment): readonly [number, number] | null {
   const bbox = seg.bbox
   if (!bbox || bbox.length < 4) return null
-  const target = bbox.slice(0, 4) as FormulaBBox
+  const target = toBBox(bbox)
+  if (!target) return null
   const column = columnBox((target[0] + target[2]) / 2)
   const candidates = inlineMath.value
     .filter((item) => isDisplayMath(item) && item.bbox && item.bbox.length >= 4)
-    .map((item) => item.bbox!.slice(0, 4) as FormulaBBox)
+    .map((item) => toBBox(item.bbox))
+    .filter((item): item is FormulaBBox => item !== null)
   return displayFormulaLane(target, candidates, column)
+}
+
+function displayHasAdjacentText(seg: RichSegment): boolean {
+  const target = toBBox(seg.bbox)
+  if (!target) return false
+  const column = columnBox((target[0] + target[2]) / 2)
+  const textBoxes = props.page.blocks.flatMap((block) =>
+    block.spans
+      .filter((span) => !spanCoveredByInlineMath(span))
+      .map((span) => toBBox(span.bbox))
+      .filter((box): box is FormulaBBox => box !== null),
+  )
+  return formulaHasAdjacentText(target, textBoxes, column)
 }
 
 function isDisplayMath(seg: RichSegment): boolean {
@@ -460,6 +424,16 @@ function mathBox(seg: RichSegment) {
   const display = isDisplayMath(seg)
   const nb = neighborTextBand(seg)
   if (display) {
+    if (displayHasAdjacentText(seg)) {
+      return {
+        x: b[0],
+        y: b[1],
+        w: Math.max(b[2] - b[0], 12),
+        h: Math.max(b[3] - b[1], 14),
+        display,
+        extraAscent: 0,
+      }
+    }
     const [cx0, cx1] = displayLaneBox(seg) || columnBox((b[0] + b[2]) / 2)
     const keep = 1
     const padTop = Math.min(3, Math.max(0, (b[1] - nb.displayPrev - keep) * 0.45))
@@ -517,7 +491,7 @@ function inlineMathGapX(seg: RichSegment, body: number): number {
   if (prevRight < 0) return 0
   const t = prevText.trimEnd()
   if (!t) return 0
-  const last = t[t.length - 1]
+  const last = t.charAt(t.length - 1)
   const tex = (seg.latex || '').trim()
   if ('([{“‘'.includes(last)) return 0
   if (/^[),.;:!?]/.test(tex)) return 0
@@ -530,7 +504,7 @@ function inlineMathGapX(seg: RichSegment, body: number): number {
 function eqTag(seg: RichSegment): string {
   const m = (seg.latex || '').match(/\\tag\s*\{([^}]+)\}/)
   if (!m) return ''
-  const n = m[1].trim()
+  const n = (m[1] || '').trim()
   if (!n) return ''
   return n.startsWith('(') ? n : `(${n})`
 }
@@ -558,7 +532,7 @@ function mathBoxStyle(seg: RichSegment) {
   }
 }
 
-function eqNumStyle(seg: RichSegment) {
+function eqNumStyle() {
   const sizePx = Math.max(8, 10 * props.scale)
   return {
     position: 'absolute' as const,
@@ -600,7 +574,7 @@ function mathFitHeight(seg: RichSegment): number {
   return mathBox(seg).h * props.scale
 }
 
-function imageStyle(bbox: number[]) {
+function imageStyle(bbox: readonly number[]) {
   const x0 = bbox[0] ?? 0
   const y0 = bbox[1] ?? 0
   const x1 = bbox[2] ?? x0
@@ -676,6 +650,7 @@ function hitAnchor(clientX: number, clientY: number): SelAnchor | null {
   let line = boxes.filter((b) => y >= b.y0 - 3 && y <= b.y1 + 3)
   if (!line.length) {
     let best = boxes[0]
+    if (!best) return null
     let bestD = 1e9
     for (const b of boxes) {
       const d = y < b.y0 ? b.y0 - y : y > b.y1 ? y - b.y1 : 0
@@ -690,6 +665,7 @@ function hitAnchor(clientX: number, clientY: number): SelAnchor | null {
   line.sort((a, b) => a.x0 - b.x0)
   const first = line[0]
   const last = line[line.length - 1]
+  if (!first || !last) return null
   let hit = first
   if (x >= last.x1 - 0.4) hit = last
   else if (x > first.x0) {
@@ -864,7 +840,7 @@ onBeforeUnmount(() => {
           :fit-width="mathFitWidth(item.seg)"
           :fit-height="mathFitHeight(item.seg)"
         />
-        <span v-if="eqTag(item.seg)" :style="eqNumStyle(item.seg)">{{ eqTag(item.seg) }}</span>
+        <span v-if="eqTag(item.seg)" :style="eqNumStyle()">{{ eqTag(item.seg) }}</span>
       </div>
       <div
         v-else-if="item.kind === 'math'"
@@ -920,6 +896,7 @@ onBeforeUnmount(() => {
   font-size: 1em;
   max-width: none;
 }
+
 .sentence-hit {
   background-color: rgb(253 224 71 / 0.42);
   box-shadow: 0 0 0 2px rgb(245 158 11 / 0.28);

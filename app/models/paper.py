@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -23,6 +23,16 @@ class Paper(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    authors: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    institutions: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    abstract: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publication: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    doi: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    arxiv_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    keywords: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     storage_name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

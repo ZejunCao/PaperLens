@@ -14,6 +14,16 @@ export interface Paper {
   id: string
   filename: string
   title: string | null
+  authors: string[]
+  institutions: string[]
+  abstract: string | null
+  publication: string | null
+  published_at: string | null
+  doi: string | null
+  arxiv_id: string | null
+  source_url: string | null
+  keywords: string[]
+  metadata_source: string | null
   page_count: number | null
   file_size: number
   status: PaperStatus

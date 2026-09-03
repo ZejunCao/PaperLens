@@ -1,6 +1,6 @@
-import type { ContentBlock, PageLayout, RichSegment, TextSpan } from '@/types/document'
+import type { BBox, ContentBlock, PageLayout, RichSegment, TextSpan } from '@/types/document'
 
-export function mathUnitKey(bbox: number[]): string {
+export function mathUnitKey(bbox: BBox): string {
   return `m:${bbox.map((n) => Math.round(n * 10) / 10).join(',')}`
 }
 
@@ -84,7 +84,7 @@ function toRanges(ids: (string | '')[]): SentRange[] {
   const ranges: SentRange[] = []
   let i = 0
   while (i < ids.length) {
-    const id = ids[i]
+    const id = ids[i] || ''
     if (!id) {
       i++
       continue
@@ -104,12 +104,12 @@ function fillOrig(len: number, marked: Map<number, string>): string[] {
   }
   let last = ''
   for (let i = 0; i < len; i++) {
-    if (arr[i]) last = arr[i]
+    if (arr[i]) last = arr[i] || ''
     else if (last) arr[i] = last
   }
   let next = ''
   for (let i = len - 1; i >= 0; i--) {
-    if (arr[i]) next = arr[i]
+    if (arr[i]) next = arr[i] || ''
     else if (next) arr[i] = next
   }
   return arr

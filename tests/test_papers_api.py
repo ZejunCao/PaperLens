@@ -4,73 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
-from app.database import Base, get_db
-from app.main import create_app
-
-
-@pytest.fixture()
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    db_path = tmp_path / "test.db"
-    uploads = tmp_path / "uploads"
-    papers = tmp_path / "papers"
-    uploads.mkdir()
-    papers.mkdir()
-
-    monkeypatch.setenv("PAPERLENS_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
-    monkeypatch.setenv("PAPERLENS_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("PAPERLENS_UPLOADS_DIR", str(uploads))
-    monkeypatch.setenv("PAPERLENS_PAPERS_DIR", str(papers))
-    monkeypatch.setenv("PAPERLENS_DISABLE_WORKER", "true")
-    monkeypatch.setenv("PAPERLENS_PARSER", "pymupdf")
-
-    from app.config import get_settings
-    from app.models import Job, Paper  # noqa: F401
-    from app.workers.parse_worker import stop_worker
-
-    get_settings.cache_clear()
-    settings = get_settings()
-    settings.data_dir = tmp_path
-    settings.uploads_dir = uploads
-    settings.papers_dir = papers
-    settings.database_url = f"sqlite:///{db_path.as_posix()}"
-    settings.disable_worker = True
-
-    engine = create_engine(
-        settings.database_url,
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    TestingSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    Base.metadata.create_all(bind=engine)
-
-    # 让 worker 辅助函数也能打到同一内存/文件库
-    import app.database as dbmod
-
-    dbmod.engine = engine
-    dbmod.SessionLocal = TestingSession
-
-    app = create_app()
-
-    def _override_db():
-        db = TestingSession()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = _override_db
-    with TestClient(app) as c:
-        yield c, TestingSession
-    stop_worker()
-    app.dependency_overrides.clear()
-    get_settings.cache_clear()
-
 
 def _minimal_pdf() -> bytes:
     return b"""%PDF-1.1
@@ -97,7 +30,15 @@ def _text_pdf(tmp_path: Path) -> Path:
     doc = fitz.open()
     page = doc.new_page(width=400, height=500)
     page.insert_text((72, 72), "Hello PaperLens Parsing.", fontsize=14)
-    page.insert_text((72, 120), "This is a second sentence for structure.", fontsize=11)
+    page.insert_text((72, 120), "This is a second sentence for structure. DOI: 10.1234/paperlens", fontsize=11)
+    doc.set_metadata(
+        {
+            "title": "PaperLens Metadata Test",
+            "author": "Ada Lovelace; Alan Turing",
+            "subject": "A metadata extraction API test.",
+            "keywords": "layout, parsing",
+        }
+    )
     doc.save(path.as_posix())
     doc.close()
     return path
@@ -230,6 +171,14 @@ def test_parse_document(client, tmp_path: Path):
         )
     assert res.status_code == 201, res.text
     paper_id = res.json()["id"]
+    assert res.json()["title"] == "PaperLens Metadata Test"
+    assert res.json()["authors"] == ["Ada Lovelace", "Alan Turing"]
+    assert res.json()["doi"] == "10.1234/paperlens"
+    assert res.json()["metadata_source"] == "pdf"
+
+    refreshed = c.post(f"/api/papers/{paper_id}/metadata")
+    assert refreshed.status_code == 200
+    assert refreshed.json()["authors"] == ["Ada Lovelace", "Alan Turing"]
 
     assert _process_one() is True
     meta = c.get(f"/api/papers/{paper_id}").json()

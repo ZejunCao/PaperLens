@@ -44,6 +44,18 @@ def test_import_from_url_downloads_and_queues(client, monkeypatch: pytest.Monkey
         return pdf
 
     monkeypatch.setattr("app.services.papers.download_arxiv_pdf", fake_download)
+    monkeypatch.setattr(
+        "app.services.papers.fetch_arxiv_metadata",
+        lambda arxiv_id: {
+            "title": "Imported arXiv Paper",
+            "authors": ["Ada Lovelace"],
+            "institutions": ["Analytical Engine Institute"],
+            "abstract": "Metadata from arXiv.",
+            "arxiv_id": arxiv_id,
+            "source_url": f"https://arxiv.org/abs/{arxiv_id}",
+            "metadata_source": "arxiv",
+        },
+    )
 
     res = c.post("/api/papers/from-url", json={"url": "https://arxiv.org/abs/2301.07041"})
     assert res.status_code == 201, res.text
@@ -51,6 +63,10 @@ def test_import_from_url_downloads_and_queues(client, monkeypatch: pytest.Monkey
     assert body["status"] == "queued"
     assert body["filename"].startswith("arxiv-2301.07041")
     assert body["file_size"] == len(pdf)
+    assert body["title"] == "Imported arXiv Paper"
+    assert body["authors"] == ["Ada Lovelace"]
+    assert body["institutions"] == ["Analytical Engine Institute"]
+    assert body["arxiv_id"] == "2301.07041"
 
     paper_id = body["id"]
     file_res = c.get(f"/api/papers/{paper_id}/file")

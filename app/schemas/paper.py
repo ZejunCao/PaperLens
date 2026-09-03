@@ -11,6 +11,16 @@ class PaperOut(BaseModel):
     id: str
     filename: str
     title: str | None = None
+    authors: list[str] = Field(default_factory=list)
+    institutions: list[str] = Field(default_factory=list)
+    abstract: str | None = None
+    publication: str | None = None
+    published_at: datetime | None = None
+    doi: str | None = None
+    arxiv_id: str | None = None
+    source_url: str | None = None
+    keywords: list[str] = Field(default_factory=list)
+    metadata_source: str | None = None
     page_count: int | None = None
     file_size: int
     status: PaperStatus

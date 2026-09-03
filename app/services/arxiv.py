@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import re
+import logging
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from typing import Any
 
 import httpx
 from fastapi import HTTPException, status
@@ -18,6 +22,10 @@ ARXIV_URL_RE = re.compile(
     r"(?:\.pdf)?",
     re.IGNORECASE,
 )
+
+logger = logging.getLogger("paperlens.arxiv")
+ATOM = "{http://www.w3.org/2005/Atom}"
+ARXIV = "{http://arxiv.org/schemas/atom}"
 
 
 def normalize_arxiv_id(raw: str) -> str:
@@ -44,6 +52,67 @@ def normalize_arxiv_id(raw: str) -> str:
 
 def arxiv_pdf_url(arxiv_id: str) -> str:
     return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+
+
+def fetch_arxiv_metadata(arxiv_id: str, *, timeout: float = 20.0) -> dict[str, Any]:
+    """Fetch authoritative metadata from the public arXiv Atom endpoint.
+
+    Metadata failure is non-fatal: importing the PDF remains useful offline.
+    """
+    try:
+        response = httpx.get(
+            "https://export.arxiv.org/api/query",
+            params={"id_list": arxiv_id},
+            headers={"User-Agent": "PaperLens/0.1 (arxiv-import)"},
+            timeout=timeout,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+        entry = root.find(f"{ATOM}entry")
+        if entry is None:
+            return {}
+
+        def text(tag: str) -> str | None:
+            node = entry.find(tag)
+            value = re.sub(r"\s+", " ", node.text or "").strip() if node is not None else ""
+            return value or None
+
+        published_text = text(f"{ATOM}published")
+        published_at = datetime.fromisoformat(published_text.replace("Z", "+00:00")) if published_text else None
+        authors = [
+            re.sub(r"\s+", " ", node.text or "").strip()
+            for node in entry.findall(f"{ATOM}author/{ATOM}name")
+            if (node.text or "").strip()
+        ]
+        institutions = list(
+            dict.fromkeys(
+                re.sub(r"\s+", " ", node.text or "").strip()
+                for node in entry.findall(f"{ATOM}author/{ARXIV}affiliation")
+                if (node.text or "").strip()
+            )
+        )
+        categories = [node.attrib.get("term", "") for node in entry.findall(f"{ATOM}category")]
+        return {
+            "title": text(f"{ATOM}title"),
+            "authors": authors,
+            "institutions": institutions,
+            "abstract": text(f"{ATOM}summary"),
+            "publication": text(f"{ARXIV}journal_ref"),
+            "published_at": published_at,
+            "doi": text(f"{ARXIV}doi"),
+            "arxiv_id": arxiv_id,
+            "source_url": f"https://arxiv.org/abs/{arxiv_id}",
+            "keywords": [value for value in categories if value],
+            "metadata_source": "arxiv",
+        }
+    except (httpx.HTTPError, ET.ParseError, ValueError) as error:
+        logger.warning("arXiv metadata unavailable id=%s: %s", arxiv_id, error)
+        return {
+            "arxiv_id": arxiv_id,
+            "source_url": f"https://arxiv.org/abs/{arxiv_id}",
+            "metadata_source": "arxiv-id",
+        }
 
 
 def download_arxiv_pdf(arxiv_id: str, *, max_bytes: int, timeout: float = 120.0) -> bytes:

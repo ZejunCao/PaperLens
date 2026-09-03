@@ -854,15 +854,16 @@ function blockRichChunks(pageNo: number, block: ContentBlock): RichChunk[] {
     (s) => !!translationPages.value[String(pageNo)]?.sentences?.[s.id],
   )
   if (!hasZh && hasMathSeg) {
-    return segs
-      .map((seg) => {
-        if (seg.kind === 'math' && (seg.latex || '').trim()) {
-          return { kind: 'math' as const, text: seg.latex || '', display: !!seg.display }
-        }
-        const t = (seg.text || '').trim() ? seg.text || '' : ''
-        return t ? { kind: 'text' as const, text: t } : null
-      })
-      .filter((c): c is RichChunk => !!c)
+    const chunks: RichChunk[] = []
+    for (const seg of segs) {
+      if (seg.kind === 'math' && (seg.latex || '').trim()) {
+        chunks.push({ kind: 'math', text: seg.latex || '', display: !!seg.display })
+        continue
+      }
+      const text = (seg.text || '').trim() ? seg.text || '' : ''
+      if (text) chunks.push({ kind: 'text', text })
+    }
+    return chunks
   }
   const raw =
     visibleSentences.length > 0

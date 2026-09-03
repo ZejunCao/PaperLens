@@ -15,12 +15,14 @@ import { cn, formatDateTime } from '@/lib/utils'
 const props = defineProps<{
   paper: Paper
   selected?: boolean
+  inspected?: boolean
   folderName?: string
   trash?: boolean
 }>()
 
 const emit = defineEmits<{
   select: [id: string, selected: boolean]
+  inspect: [id: string]
   open: [id: string]
   rename: [id: string]
   remove: [id: string]
@@ -42,12 +44,12 @@ function startDrag(event: DragEvent) {
 <template>
   <article
     class="group grid min-h-[66px] cursor-default grid-cols-[34px_minmax(240px,1fr)_120px_90px_128px_116px] items-center gap-3 border-t border-border/45 px-3 transition-colors first:border-t-0 hover:bg-white/45"
-    :class="selected && 'bg-primary/6'"
+    :class="[selected && 'bg-primary/6', inspected && 'bg-white/55']"
     draggable="true"
     @dragstart="startDrag"
-    @dblclick="!trash && emit('open', paper.id)"
+    @click.stop="emit('inspect', paper.id)"
   >
-    <label class="grid h-8 w-8 cursor-pointer place-items-center" @dblclick.stop>
+    <label class="grid h-8 w-8 cursor-pointer place-items-center" @click.stop>
       <input
         type="checkbox"
         class="h-3.5 w-3.5 accent-primary"
@@ -61,7 +63,16 @@ function startDrag(event: DragEvent) {
         <FileText class="h-4 w-4" />
       </div>
       <div class="min-w-0">
-        <p class="truncate text-sm font-medium text-foreground" :title="displayTitle">{{ displayTitle }}</p>
+        <button
+          type="button"
+          class="block max-w-full truncate text-left text-sm font-medium text-foreground decoration-1 underline-offset-4"
+          :class="!trash && 'hover:underline'"
+          :disabled="trash"
+          :title="trash ? displayTitle : `${displayTitle} · 打开阅读`"
+          @click.stop="!trash && emit('open', paper.id)"
+        >
+          {{ displayTitle }}
+        </button>
         <p class="mt-0.5 truncate text-[10px] text-muted-foreground">
           {{ folderName || '未归档' }} · {{ paper.filename }}
         </p>
@@ -83,21 +94,21 @@ function startDrag(event: DragEvent) {
     <span class="text-xs tabular-nums text-muted-foreground">{{ formatDateTime(paper.updated_at) }}</span>
     <div class="flex items-center justify-end gap-0.5 opacity-55 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
       <template v-if="trash">
-        <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground" title="恢复" @click="emit('restore', paper.id)">
+        <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground" title="恢复" @click.stop="emit('restore', paper.id)">
           <ArchiveRestore class="h-4 w-4" />
         </button>
-        <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive" title="永久删除" @click="emit('permanent', paper.id)">
+        <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive" title="永久删除" @click.stop="emit('permanent', paper.id)">
           <Trash2 class="h-4 w-4" />
         </button>
       </template>
       <template v-else>
-        <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-30" :disabled="active" :title="active ? parseStageLabel(paper.parse_stage) : '重新解析'" @click="emit('reparse', paper.id)">
+        <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-30" :disabled="active" :title="active ? parseStageLabel(paper.parse_stage) : '重新解析'" @click.stop="emit('reparse', paper.id)">
           <RefreshCw class="h-4 w-4" />
         </button>
-        <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground" title="重命名" @click="emit('rename', paper.id)">
+        <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground" title="重命名" @click.stop="emit('rename', paper.id)">
           <Pencil class="h-4 w-4" />
         </button>
-        <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive" title="移到回收站" @click="emit('remove', paper.id)">
+        <button type="button" class="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive" title="移到回收站" @click.stop="emit('remove', paper.id)">
           <Trash2 class="h-4 w-4" />
         </button>
       </template>

@@ -85,6 +85,11 @@ def mark_paper_opened(paper_id: str, db: Session = Depends(get_db)) -> PaperOut:
     return PaperOut.model_validate(papers_service.mark_opened(db, paper_id))
 
 
+@router.post("/{paper_id}/metadata", response_model=PaperOut)
+def refresh_paper_metadata(paper_id: str, db: Session = Depends(get_db)) -> PaperOut:
+    return PaperOut.model_validate(papers_service.refresh_paper_metadata(db, paper_id))
+
+
 @router.delete("/{paper_id}/permanent", status_code=204)
 def permanently_delete_paper(paper_id: str, db: Session = Depends(get_db)) -> None:
     papers_service.permanently_delete_paper(db, paper_id)

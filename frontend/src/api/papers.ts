@@ -99,6 +99,12 @@ export async function markPaperOpened(id: string): Promise<void> {
   if (!res.ok) throw new Error(await parseError(res))
 }
 
+export async function refreshPaperMetadata(id: string): Promise<Paper> {
+  const res = await fetch(`/api/papers/${id}/metadata`, { method: 'POST' })
+  if (!res.ok) throw new Error(await parseError(res))
+  return res.json()
+}
+
 export async function fetchFolders(): Promise<FolderListResponse> {
   const res = await fetch('/api/folders')
   if (!res.ok) throw new Error(await parseError(res))

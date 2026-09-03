@@ -12,11 +12,14 @@ export type BlockType =
   | 'header'
   | 'other'
 
+/** 页面坐标统一使用四元组，避免布局计算读取到缺失坐标。 */
+export type BBox = readonly [number, number, number, number]
+
 export interface Sentence {
   id: string
   text: string
   order: number
-  bbox?: number[] | null
+  bbox?: BBox | null
   /** 跨页句子的完整文本；text 仍是当前页用于版式匹配的片段。 */
   full_text?: string | null
   /** 完整句子在右栏及翻译中的归属页。 */
@@ -26,7 +29,7 @@ export interface Sentence {
 export interface TextSpan {
   id: string
   text: string
-  bbox: number[]
+  bbox: BBox
   font_size: number
   font_name?: string | null
   color?: number | null
@@ -40,7 +43,7 @@ export interface RichSegment {
   kind: 'text' | 'math'
   text?: string
   latex?: string
-  bbox?: number[] | null
+  bbox?: BBox | null
   display?: boolean
   font_size?: number | null
   origin_y?: number | null
@@ -53,7 +56,7 @@ export interface ContentBlock {
   type: BlockType
   page: number
   order: number
-  bbox: number[]
+  bbox: BBox
   source_text: string
   sentences: Sentence[]
   spans: TextSpan[]
@@ -64,7 +67,7 @@ export interface ContentBlock {
 export interface PageImage {
   id: string
   page: number
-  bbox: number[]
+  bbox: BBox
   path: string
   kind?: string
 }

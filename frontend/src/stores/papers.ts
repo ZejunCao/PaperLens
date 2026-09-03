@@ -136,6 +136,13 @@ export const usePapersStore = defineStore('papers', () => {
     return paper
   }
 
+  async function refreshMetadata(id: string) {
+    const paper = await api.refreshPaperMetadata(id)
+    const idx = items.value.findIndex((item) => item.id === id)
+    if (idx >= 0) items.value[idx] = paper
+    return paper
+  }
+
   return {
     items,
     loading,
@@ -151,6 +158,7 @@ export const usePapersStore = defineStore('papers', () => {
     restore,
     removePermanently,
     reparse,
+    refreshMetadata,
     getOne,
   }
 })
